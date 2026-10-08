@@ -1,4 +1,5 @@
 use std::sync::LazyLock;
+mod normalize;
 
 mod error;
 
