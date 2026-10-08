@@ -3,6 +3,8 @@ mod normalize;
 mod params;
 
 mod error;
+mod pace;
+mod fetch;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
