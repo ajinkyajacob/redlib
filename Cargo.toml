@@ -70,3 +70,7 @@ sealed_test = "1.0.0"
 codegen-units = 1
 lto = true
 strip = "symbols"
+
+[workspace]
+members = [".", "mcp"]
+resolver = "2"

@@ -8,3 +8,7 @@ redlib.toml
 # nix files
 .direnv/
 result
+
+# agent worktrees
+.worktrees/
+
