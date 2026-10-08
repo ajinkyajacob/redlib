@@ -1,5 +1,7 @@
 use std::sync::LazyLock;
 
+mod error;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	LazyLock::force(&redlib::config::CONFIG);
