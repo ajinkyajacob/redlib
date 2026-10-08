@@ -28,6 +28,14 @@
 
 Never add a direct `schemars` dependency — import `rmcp::schemars::JsonSchema` so the version can never drift from rmcp's.
 
+> **Corrections found during Wave 1 execution - apply to all later tasks:**
+> 1. The crate has only a bin target, so `cargo test -p redlib-mcp` needs NO `--lib` flag; inline unit tests compile into the bin.
+> 2. `rmcp::schemars::JsonSchema` alone is insufficient - the file also needs `use rmcp::schemars;` so the derive's bare paths resolve.
+> 3. `prune_bfs` must clone roots (`let mut level = roots.clone();`) since the rebuild pass needs the originals.
+> 4. Every fixture passed to `post_and_comments` needs a real `t3` child in element 0 or it returns `None`.
+> 5. `Cargo.lock` is rewritten on first build after adding rmcp - stage it with the first dependency change.
+
+---
 ## File structure
 
 | File | Responsibility |
@@ -307,7 +315,7 @@ mod tests {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: compile error — `ErrorKind`/`FetchError`/`map_client_err` undefined.
 
 - [ ] **Step 3: Implement**
@@ -392,7 +400,7 @@ pub fn map_client_err(message: String) -> FetchError {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
@@ -466,7 +474,7 @@ mod tests {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: compile errors for the missing functions.
 
 - [ ] **Step 3: Implement**
@@ -537,7 +545,7 @@ pub fn parse_post_url(url: &str) -> Result<(String, String), FetchError> {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: PASS, 13 tests total.
 
 - [ ] **Step 5: Commit**
@@ -686,7 +694,7 @@ mod tests {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: compile errors — functions and `COMMENT_BODY_CAP` undefined.
 
 - [ ] **Step 3: Implement**
@@ -884,7 +892,7 @@ pub fn post_and_comments(page: &Value, budget: usize) -> Option<PostPage> {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: PASS, 21 tests.
 
 - [ ] **Step 5: Commit**
@@ -927,7 +935,7 @@ mod tests {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: compile error — `Pacer` undefined.
 
 - [ ] **Step 3: Implement the pacer**
@@ -1002,7 +1010,7 @@ pub async fn get(path: &str) -> Result<Value, FetchError> {
 
 - [ ] **Step 5: Run to verify pass**
 
-Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp --lib`
+Run: `pwsh -File mcp/dev-build.ps1 test -p redlib-mcp`
 Expected: PASS, 22 tests.
 
 - [ ] **Step 6: Commit**
