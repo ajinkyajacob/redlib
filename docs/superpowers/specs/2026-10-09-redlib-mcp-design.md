@@ -90,7 +90,9 @@ structurally impossible from the agent side; the allowlist still guards internal
 ### Normalization rules
 
 - Post: `id, title, subreddit, author, score, comment_count, created_utc, permalink, url, flair, over_18, is_self, selftext`
-- Comment: `id, author, score, body, is_op, is_mod, is_deleted, more_id?, replies[]`
+- Comment: `id, author, score, body, is_deleted, more_id?, replies[]`. No `is_op`/`is_mod` —
+  those markers exist only in redlib's rendered HTML, never in Reddit's JSON, so they are
+  omitted rather than faked
 - Drop: `preview.images`, audit fields (`*_by`), everything not listed above
 - `link_flair_text` collapses `null` and `""` to `None`
 - Unknown keys are tolerated (Reddit renames fields); only `id` + `title` are required
