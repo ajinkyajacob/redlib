@@ -2,6 +2,8 @@ use std::sync::LazyLock;
 mod normalize;
 
 mod error;
+mod pace;
+mod fetch;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
