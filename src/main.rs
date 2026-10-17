@@ -12,7 +12,7 @@ use log::{info, warn};
 use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
-use redlib::{config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
+use redlib::{api, config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
 
 use redlib::client::OAUTH_CLIENT;
 
@@ -407,6 +407,16 @@ async fn main() {
 	});
 
 	// Default service in case no routes match
+	// Read-only JSON API (A3). Only registered when the kill switch is on.
+	if redlib::api::enabled() {
+		app.at("/api/v1/health").get(|r| api::health(r).boxed());
+		app.at("/api/v1/r/:sub").get(|r| api::subreddit(r).boxed());
+		app.at("/api/v1/r/:sub/comments/:id").get(|r| api::comments(r).boxed());
+		app.at("/api/v1/search").get(|r| api::search(r).boxed());
+		app.at("/api/v1/u/:name").get(|r| api::user(r).boxed());
+		app.at("/api/v1/*").get(|_| api::not_found().boxed());
+	}
+
 	app.at("/*").get(|req| error(req, "Nothing here").boxed());
 
 	println!("Running Redlib v{} on {listener}!", env!("CARGO_PKG_VERSION"));
