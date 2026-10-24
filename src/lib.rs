@@ -7,6 +7,7 @@ pub mod instance_info;
 pub mod normalize;
 pub mod oauth;
 pub mod oauth_resources;
+pub mod params;
 pub mod post;
 pub mod search;
 pub mod server;
