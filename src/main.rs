@@ -155,7 +155,16 @@ async fn main() {
 				.default_value("604800")
 				.num_args(1),
 		)
+		.subcommand(Command::new("mcp").about("Serve MCP over stdio").version(env!("CARGO_PKG_VERSION")))
 		.get_matches();
+
+	if matches.subcommand_matches("mcp").is_some() {
+		if let Err(e) = redlib::mcp::stdio::serve().await {
+			eprintln!("mcp server error: {e}");
+			std::process::exit(1);
+		}
+		return;
+	}
 
 	match rate_limit_check().await {
 		Ok(()) => {

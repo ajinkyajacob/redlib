@@ -3,6 +3,7 @@
 
 pub mod fetch;
 pub mod pace;
+pub mod stdio;
 pub mod tools;
 
 pub use tools::RedlibServer;
