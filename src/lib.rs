@@ -4,6 +4,7 @@ pub mod config;
 pub mod duplicates;
 pub mod errors;
 pub mod instance_info;
+pub mod normalize;
 pub mod oauth;
 pub mod oauth_resources;
 pub mod post;
