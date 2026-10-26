@@ -2,6 +2,7 @@
 //! in later tasks) the stdio and Streamable HTTP transports.
 
 pub mod fetch;
+pub mod http;
 pub mod pace;
 pub mod stdio;
 pub mod tools;
