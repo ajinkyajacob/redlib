@@ -5,8 +5,6 @@
 //! [`ListingOut`] envelope (`ok` / `kind` / `result_count` / `cursor` / `posts`) that both
 //! surfaces return, which keeps listing responses byte-identical across them.
 
-use std::collections::HashSet;
-
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -170,39 +168,66 @@ fn count_nodes(nodes: &[CommentOut]) -> usize {
 }
 
 /// Breadth-first budget so a single deep thread cannot starve the rest of the page.
+///
+/// Nodes are addressed by their position in the flattened tree: Reddit sends an
+/// empty `id` for deleted comments, and keying by id would let one budget slot
+/// keep every deleted sibling.
 fn prune_bfs(roots: Vec<CommentOut>, budget: usize) -> (Vec<CommentOut>, usize) {
-	let mut kept: HashSet<String> = HashSet::new();
-	let mut level = roots.clone();
+	struct Flat {
+		comment: CommentOut,
+		children: Vec<usize>,
+	}
+
+	fn flatten(nodes: Vec<CommentOut>, flat: &mut Vec<Flat>) -> Vec<usize> {
+		let mut positions = Vec::with_capacity(nodes.len());
+		for mut node in nodes {
+			let position = flat.len();
+			let children = std::mem::take(&mut node.replies);
+			flat.push(Flat {
+				comment: node,
+				children: Vec::new(),
+			});
+			let child_positions = flatten(children, flat);
+			flat[position].children = child_positions;
+			positions.push(position);
+		}
+		positions
+	}
+
+	fn rebuild(position: usize, flat: &mut [Option<Flat>], kept: &[bool]) -> Option<CommentOut> {
+		if !kept[position] {
+			return None;
+		}
+		let Flat { comment, children } = flat[position].take()?;
+		let mut comment = comment;
+		comment.replies = children.into_iter().filter_map(|child| rebuild(child, flat, kept)).collect();
+		Some(comment)
+	}
+
+	let mut flat = Vec::new();
+	let root_positions = flatten(roots, &mut flat);
+	let mut kept = vec![false; flat.len()];
 	let mut count = 0;
+	let mut level = root_positions.clone();
 	while !level.is_empty() && count < budget {
 		let mut next = Vec::new();
-		for node in level {
+		for position in level {
 			if count >= budget {
 				break;
 			}
-			kept.insert(node.id.clone());
+			kept[position] = true;
 			count += 1;
-			next.extend(node.replies);
+			next.extend(flat[position].children.iter().copied());
 		}
 		level = next;
 	}
-	fn rebuild(node: &mut CommentOut, kept: &HashSet<String>) {
-		let mut out = Vec::new();
-		for mut reply in std::mem::take(&mut node.replies) {
-			if kept.contains(&reply.id) {
-				rebuild(&mut reply, kept);
-				out.push(reply);
-			}
-		}
-		node.replies = out;
-	}
-	let mut roots_out = Vec::new();
-	for mut root in roots {
-		if kept.contains(&root.id) {
-			rebuild(&mut root, &kept);
-			roots_out.push(root);
-		}
-	}
+	let roots_out: Vec<CommentOut> = {
+		let mut slots: Vec<Option<Flat>> = flat.into_iter().map(Some).collect();
+		root_positions
+			.into_iter()
+			.filter_map(|position| rebuild(position, &mut slots, &kept))
+			.collect()
+	};
 	let comments_returned = count_nodes(&roots_out);
 	debug_assert_eq!(comments_returned, count, "prune_bfs emitted a tree that disagrees with its budget count");
 	(roots_out, comments_returned)
@@ -450,5 +475,25 @@ mod tests {
 	fn returns_none_when_first_listing_has_no_post() {
 		let v = json!([{"kind": "Listing", "data": {"children": []}}, {"kind": "Listing", "data": {"children": []}}]);
 		assert!(post_and_comments(&v, 50).is_none());
+	}
+
+	/// Deleted comments reach the normalizer with an empty `id`. Pruning must not
+	/// treat them as one node, or a single budget slot keeps every deleted sibling.
+	#[test]
+	fn budget_spends_one_slot_per_deleted_comment() {
+		let deleted = || json!({"kind": "t1", "data": {"id": "", "author": "[deleted]", "body": "[deleted]"}});
+		let v = json!([
+			{"kind": "Listing", "data": {"children": [
+				json!({"kind": "t3", "data": {"id": "p1", "title": "Post", "subreddit": "rust"}})
+			]}},
+			{"kind": "Listing", "data": {"children": [
+				json!({"kind": "t1", "data": {"id": "c1", "author": "a", "body": "b", "replies": {
+					"kind": "Listing", "data": {"children": [deleted(), deleted(), deleted()]}
+				}}})
+			]}}
+		]);
+		let page = post_and_comments(&v, 2).expect("page");
+		assert_eq!(page.comments_returned, 2);
+		assert_eq!(count_nodes(&page.comments), 2);
 	}
 }
