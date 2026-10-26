@@ -34,7 +34,7 @@ impl ErrorKind {
 
 	pub fn hint(self) -> &'static str {
 		match self {
-			Self::TokenStale => "Reddit rejected the OAuth token. Restart the MCP server to obtain a fresh one.",
+			Self::TokenStale => "Reddit rejected the OAuth token. Restart redlib to obtain a fresh one.",
 			Self::RateLimited => "Back off a few seconds before retrying.",
 			_ => "",
 		}
@@ -141,7 +141,7 @@ mod tests {
 		let e = RedditError::new(ErrorKind::TokenStale, "boom");
 		assert_eq!(
 			e.to_error_data().message,
-			"UPSTREAM_TOKEN_STALE: boom — Reddit rejected the OAuth token. Restart the MCP server to obtain a fresh one."
+			"UPSTREAM_TOKEN_STALE: boom — Reddit rejected the OAuth token. Restart redlib to obtain a fresh one."
 		);
 	}
 

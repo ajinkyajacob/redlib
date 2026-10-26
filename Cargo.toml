@@ -76,9 +76,7 @@ codegen-units = 1
 lto = true
 strip = "symbols"
 
-# Workspace root: `mcp/` is deliberately not a member. The explicit (empty)
-# table also stops cargo from adopting an ancestor workspace when this checkout
-# lives inside another repo or a git worktree. `exclude` keeps `mcp/` buildable
-# as a standalone package until Task 12 deletes it.
+# Workspace root: the explicit (empty) table stops cargo from adopting an
+# ancestor workspace when this checkout lives inside another repo or a git
+# worktree (for example `.worktrees/<name>`).
 [workspace]
-exclude = ["mcp"]

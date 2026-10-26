@@ -1,7 +1,7 @@
 //! Single normalisation layer shared by the REST API and the MCP tools.
 //!
-//! Reddit's JSON is reshaped here exactly once, so `redlib` and `redlib-mcp` cannot drift
-//! apart in field names, caps, or comment-tree pruning. [`listing_out`] builds the
+//! Reddit's JSON is reshaped here exactly once, so the REST API and the MCP tools cannot
+//! drift apart in field names, caps, or comment-tree pruning. [`listing_out`] builds the
 //! [`ListingOut`] envelope (`ok` / `kind` / `result_count` / `cursor` / `posts`) that both
 //! surfaces return, which keeps listing responses byte-identical across them.
 

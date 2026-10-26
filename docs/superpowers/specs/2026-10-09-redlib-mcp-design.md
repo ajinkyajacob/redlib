@@ -200,6 +200,8 @@ smoke test) so small results are normal.
 
 ## Deferred: A3 (HTTP access)
 
+> **Superseded by `2026-10-17-unified-cli-design.md` (A4).** The deferral below is historical; the merge, the dedupe and the HTTP transport all land in A4.
+
 1. Add `src/api.rs` + 5 routes to the fork (`/api/v1/{r,search,u,health}`), JSON errors on
    every path, 30 rpm token bucket, `REDLIB_API_ENABLED` kill switch, honoring redlibe's
    lessons (honor `sort`, sanitize every route)
