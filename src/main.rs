@@ -490,8 +490,11 @@ async fn main() {
 					}
 				}
 				result = redlib::mcp::http::serve(bind, token) => {
+					// Only a bind failure returns from `serve`; a listener that cannot
+					// start must not leave the process looking healthy.
 					if let Err(e) = result {
 						eprintln!("MCP server error: {e}");
+						std::process::exit(1);
 					}
 				}
 			}
