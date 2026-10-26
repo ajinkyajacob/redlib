@@ -1,12 +1,14 @@
-//! Read-only JSON API (deferred A3): `/api/v1/r/:sub`, `/api/v1/r/:sub/comments/:id`,
-//! `/api/v1/search`, `/api/v1/u/:name`, `/api/v1/health`. JSON errors on every path,
-//! 30 req/min token bucket, `REDLIB_API_ENABLED` kill switch.
+//! Read-only JSON API: `/api/v1/r/:sub`, `/api/v1/r/:sub/comments/:id`, `/api/v1/search`,
+//! `/api/v1/u/:name`, `/api/v1/health`. Every route except `/health` requires a bearer
+//! token matching `REDLIB_API_TOKEN`; an unset or blank token leaves the whole surface
+//! unmounted. JSON errors on every path, 30 req/min token bucket.
 #![allow(clippy::cmp_owned)]
 
 use crate::errors::{map_client_err, ErrorKind, RedditError};
 use crate::normalize::{listing_out, post_and_comments};
 use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_query};
 use crate::{client::json, server::RequestExt, utils::param};
+use hyper::header::{HeaderValue, AUTHORIZATION, WWW_AUTHENTICATE};
 use hyper::{Body, Request, Response};
 use serde_json::{json, Value};
 use std::sync::{LazyLock, Mutex};
@@ -21,15 +23,32 @@ const SORTS_COMMENTS: &[&str] = &["confidence", "top", "new", "controversial", "
 const SORTS_USER: &[&str] = &["new", "hot", "top"];
 const TIMES: &[&str] = &["hour", "day", "week", "month", "year", "all"];
 
-pub fn enabled() -> bool {
-	match std::env::var("REDLIB_API_ENABLED") {
-		Ok(v) => parse_enabled(&v),
-		Err(_) => false,
-	}
+/// The bearer token that unlocks the API, trimmed. `None` when unset or blank, which
+/// leaves `/api/v1` unmounted entirely.
+pub fn token() -> Option<String> {
+	std::env::var("REDLIB_API_TOKEN").ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
-fn parse_enabled(value: &str) -> bool {
-	matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes")
+pub fn enabled() -> bool {
+	token().is_some()
+}
+
+/// Constant-time bearer check. The scheme is case-insensitive; the credential must match
+/// byte for byte. Length differences are folded into the accumulator so a mismatch costs
+/// the same work as a near-match.
+pub(crate) fn bearer_matches(header: Option<&str>, expected: &str) -> bool {
+	let Some((scheme, credential)) = header.and_then(|h| h.split_once(' ')) else {
+		return false;
+	};
+	if !scheme.eq_ignore_ascii_case("bearer") {
+		return false;
+	}
+	let (a, b) = (credential.as_bytes(), expected.as_bytes());
+	let mut diff = (a.len() ^ b.len()) as u8;
+	for i in 0..a.len().min(b.len()) {
+		diff |= a[i] ^ b[i];
+	}
+	diff == 0
 }
 
 struct Bucket {
@@ -57,7 +76,7 @@ impl Bucket {
 
 static BUCKET: LazyLock<Mutex<Bucket>> = LazyLock::new(|| Mutex::new(Bucket::new()));
 
-fn rate_limit_take() -> bool {
+pub(crate) fn rate_limit_take() -> bool {
 	BUCKET.lock().unwrap_or_else(|e| e.into_inner()).take_at(Instant::now())
 }
 
@@ -138,9 +157,11 @@ fn param_u32(req: &Request<Body>, key: &str) -> Option<u32> {
 	query(req, key).and_then(|v| v.parse().ok())
 }
 
-fn gate() -> Result<(), RedditError> {
-	if !enabled() {
-		return Err(RedditError::new(ErrorKind::Unavailable, "API is disabled; set REDLIB_API_ENABLED=1 to enable"));
+fn gate(req: &Request<Body>) -> Result<(), RedditError> {
+	let expected = token().ok_or_else(|| RedditError::new(ErrorKind::Unauthorized, "API is disabled"))?;
+	let header = req.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+	if !bearer_matches(header, &expected) {
+		return Err(RedditError::new(ErrorKind::Unauthorized, "missing or invalid bearer token"));
 	}
 	if !rate_limit_take() {
 		return Err(RedditError::new(ErrorKind::RateLimited, "rate limit exceeded: 30 requests/minute"));
@@ -158,7 +179,14 @@ fn json_response(status: u16, body: Value) -> Result<Response<Body>, String> {
 }
 
 fn err_response(e: RedditError) -> Result<Response<Body>, String> {
-	json_response(e.status(), e.to_json())
+	let status = e.status();
+	let mut res = json_response(status, e.to_json())?;
+	if status == 401 {
+		if let Ok(challenge) = HeaderValue::from_str("Bearer") {
+			res.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+		}
+	}
+	Ok(res)
 }
 
 pub async fn health(_req: Request<Body>) -> Result<Response<Body>, String> {
@@ -178,7 +206,7 @@ pub async fn not_found() -> Result<Response<Body>, String> {
 }
 
 pub async fn subreddit(req: Request<Body>) -> Result<Response<Body>, String> {
-	if let Err(e) = gate() {
+	if let Err(e) = gate(&req) {
 		return err_response(e);
 	}
 	let sub = req.param("sub").unwrap_or_default();
@@ -193,7 +221,7 @@ pub async fn subreddit(req: Request<Body>) -> Result<Response<Body>, String> {
 }
 
 pub async fn comments(req: Request<Body>) -> Result<Response<Body>, String> {
-	if let Err(e) = gate() {
+	if let Err(e) = gate(&req) {
 		return err_response(e);
 	}
 	let id = req.param("id").unwrap_or_default();
@@ -212,7 +240,7 @@ pub async fn comments(req: Request<Body>) -> Result<Response<Body>, String> {
 }
 
 pub async fn search(req: Request<Body>) -> Result<Response<Body>, String> {
-	if let Err(e) = gate() {
+	if let Err(e) = gate(&req) {
 		return err_response(e);
 	}
 	let path = match search_path(&query(&req, "q").unwrap_or_default(), query(&req, "subreddit").as_deref(), query(&req, "sort").as_deref(), query(&req, "t").as_deref(), param_u32(&req, "limit")) {
@@ -226,7 +254,7 @@ pub async fn search(req: Request<Body>) -> Result<Response<Body>, String> {
 }
 
 pub async fn user(req: Request<Body>) -> Result<Response<Body>, String> {
-	if let Err(e) = gate() {
+	if let Err(e) = gate(&req) {
 		return err_response(e);
 	}
 	let name = req.param("name").unwrap_or_default();
@@ -243,15 +271,77 @@ pub async fn user(req: Request<Body>) -> Result<Response<Body>, String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use sealed_test::prelude::*;
 	use std::time::{Duration, Instant};
 
+	/// Clears `REDLIB_API_TOKEN` even if the test panics, so a failure cannot leak the
+	/// token into another test that expects the API to be off.
+	struct TokenEnv;
+
+	impl TokenEnv {
+		fn set(value: &str) -> Self {
+			std::env::set_var("REDLIB_API_TOKEN", value);
+			Self
+		}
+	}
+
+	impl Drop for TokenEnv {
+		fn drop(&mut self) {
+			std::env::remove_var("REDLIB_API_TOKEN");
+		}
+	}
+
+	#[sealed_test]
+	fn token_absent_means_disabled() {
+		let _env = TokenEnv;
+		std::env::remove_var("REDLIB_API_TOKEN");
+		assert!(token().is_none());
+		assert!(!enabled());
+	}
+
+	#[sealed_test]
+	fn token_present_means_enabled() {
+		let _env = TokenEnv::set("s3cret");
+		assert_eq!(token().as_deref(), Some("s3cret"));
+		assert!(enabled());
+	}
+
+	#[sealed_test]
+	fn whitespace_only_token_behaves_as_unset() {
+		let _env = TokenEnv::set("   ");
+		assert!(token().is_none(), "whitespace-only token must not enable the surfaces");
+		assert!(!enabled());
+	}
+
+	#[sealed_test]
+	fn empty_token_behaves_as_unset() {
+		let _env = TokenEnv::set("");
+		assert!(token().is_none());
+		assert!(!enabled());
+	}
+
 	#[test]
-	fn parses_enabled_flag() {
-		assert!(parse_enabled("1"));
-		assert!(parse_enabled("on"));
-		assert!(parse_enabled("TRUE"));
-		assert!(!parse_enabled(""));
-		assert!(!parse_enabled("0"));
+	fn bearer_matches_accepts_exact_token() {
+		assert!(bearer_matches(Some("Bearer s3cret"), "s3cret"));
+		assert!(bearer_matches(Some("bearer s3cret"), "s3cret"), "scheme is case-insensitive");
+	}
+
+	#[test]
+	fn bearer_matches_rejects_malformed_headers() {
+		assert!(!bearer_matches(None, "s3cret"));
+		assert!(!bearer_matches(Some("s3cret"), "s3cret"), "scheme is mandatory");
+		assert!(!bearer_matches(Some("Basic s3cret"), "s3cret"), "wrong scheme");
+		assert!(!bearer_matches(Some("Bearer wrong"), "s3cret"), "wrong token");
+		assert!(!bearer_matches(Some("Bearer  s3cret"), "s3cret"), "double space is not the token");
+		assert!(!bearer_matches(Some("Bearer s3cret "), "s3cret"), "trailing space is not the token");
+		assert!(!bearer_matches(Some("Bearer "), "s3cret"), "empty credential");
+	}
+
+	#[test]
+	fn unauthorized_error_carries_www_authenticate() {
+		let res = err_response(RedditError::new(ErrorKind::Unauthorized, "missing bearer token")).unwrap();
+		assert_eq!(res.status(), 401);
+		assert_eq!(res.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
 	}
 
 	#[test]
