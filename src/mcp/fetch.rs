@@ -21,6 +21,13 @@ pub async fn get(path: &str) -> Result<Value, RedditError> {
 	crate::client::json(path.to_owned(), false).await.map_err(map_client_err)
 }
 
+/// Fetch a post with its comments. Goes through the GraphQL path because
+/// Reddit answers the anonymous comments JSON endpoint with HTTP 403.
+pub async fn post(path: &str) -> Result<Value, RedditError> {
+	PACER.wait().await;
+	crate::gql::thread(path.to_owned(), false).await.map_err(map_client_err)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

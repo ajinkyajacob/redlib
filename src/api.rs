@@ -6,7 +6,7 @@
 
 use crate::errors::{map_client_err, ErrorKind, RedditError};
 use crate::normalize::{listing_out, post_and_comments};
-use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_query};
+use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_cursor, validate_query};
 use crate::{client::json, server::RequestExt, utils::param};
 use hyper::header::{HeaderValue, AUTHORIZATION, WWW_AUTHENTICATE};
 use hyper::{Body, Request, Response};
@@ -137,13 +137,15 @@ fn search_path(query: &str, subreddit: Option<&str>, sort: Option<&str>, time: O
 	}
 }
 
-fn post_path(id: &str, sort: Option<&str>, comment: Option<&str>, max_comments: Option<u32>) -> Result<String, RedditError> {
+fn post_path(id: &str, sort: Option<&str>, comment: Option<&str>, max_comments: Option<u32>, cursor: Option<&str>) -> Result<String, RedditError> {
 	let id = sanitize_name(id)?;
 	let mut parts: Vec<String> = vec![format!("limit={}", clamp_limit(max_comments))];
 	if let Some(sort) = sort {
 		parts.push(format!("sort={}", require_allowed(sort, SORTS_COMMENTS)?));
 	}
-	if let Some(comment) = comment {
+	if let Some(cursor) = cursor {
+		parts.push(format!("cursor={}", encode(&validate_cursor(cursor)?)));
+	} else if let Some(comment) = comment {
 		parts.push(format!("comment={}", encode(&sanitize_name(comment)?)));
 	}
 	Ok(format!("/comments/{id}.json?depth=10&{}", parts.join("&")))
@@ -226,11 +228,11 @@ pub async fn comments(req: Request<Body>) -> Result<Response<Body>, String> {
 	}
 	let id = req.param("id").unwrap_or_default();
 	let max = param_u32(&req, "max_comments");
-	let path = match post_path(&id, query(&req, "sort").as_deref(), query(&req, "comment").as_deref(), max) {
+	let path = match post_path(&id, query(&req, "sort").as_deref(), query(&req, "comment").as_deref(), max, query(&req, "cursor").as_deref()) {
 		Ok(p) => p,
 		Err(e) => return err_response(e),
 	};
-	match json(path, false).await {
+	match crate::gql::thread(path, false).await {
 		Ok(v) => match post_and_comments(&v, max.unwrap_or(50).max(1) as usize) {
 			Some(page) => json_response(200, serde_json::to_value(page).map_err(|e| e.to_string())?),
 			None => err_response(RedditError::new(ErrorKind::Unavailable, format!("no post with id {id}"))),
@@ -401,10 +403,23 @@ mod tests {
 
 	#[test]
 	fn post_path_includes_sort_and_comment() {
-		let p = post_path("abc123", Some("top"), Some("t1_more"), Some(50)).unwrap();
+		let p = post_path("abc123", Some("top"), Some("t1_more"), Some(50), None).unwrap();
 		assert!(p.starts_with("/comments/abc123.json?depth=10"), "{p}");
 		assert!(p.contains("&sort=top"), "{p}");
 		assert!(p.contains("&comment=t1_more"), "{p}");
 		assert!(p.contains("&limit=50"), "{p}");
+	}
+
+	#[test]
+	fn post_path_prefers_cursor_over_comment() {
+		let p = post_path("abc123", None, Some("t1_more"), Some(10), Some("WTI5dGJXVnVkSFJ5")).unwrap();
+		assert!(p.contains("&cursor=WTI5dGJXVnVkSFJ5"), "{p}");
+		assert!(!p.contains("comment="), "{p}");
+	}
+
+	#[test]
+	fn post_path_rejects_injected_cursor() {
+		let e = post_path("abc123", None, None, Some(10), Some("abc&raw_json=0")).unwrap_err();
+		assert_eq!(e.kind, ErrorKind::BadInput);
 	}
 }

@@ -45,6 +45,21 @@ pub fn require_allowed<'a>(value: &str, allowed: &[&'a str]) -> Result<&'a str, 
 		.ok_or_else(|| RedditError::new(ErrorKind::BadInput, format!("{value:?} is not one of {}", allowed.join(", "))))
 }
 
+pub const MAX_CURSOR_LEN: usize = 8192;
+
+/// Cursors are opaque URL-safe base64 strings echoed back by Reddit. Validate the
+/// alphabet so a caller cannot smuggle extra query parameters into the upstream
+/// path.
+pub fn validate_cursor(cursor: &str) -> Result<String, RedditError> {
+	let trimmed = cursor.trim();
+	let ok = !trimmed.is_empty() && trimmed.len() <= MAX_CURSOR_LEN && trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'='));
+	if ok {
+		Ok(trimmed.to_owned())
+	} else {
+		Err(RedditError::new(ErrorKind::BadInput, "invalid cursor"))
+	}
+}
+
 /// Extract `(subreddit, post_id)` from a post permalink.
 ///
 /// The host is deliberately ignored: only the `/r/<sub>/comments/<id>` path is
@@ -142,5 +157,20 @@ mod tests {
 	fn requires_allowlisted_value() {
 		assert_eq!(require_allowed("new", &["hot", "new"]).unwrap(), "new");
 		assert_eq!(require_allowed("chaotic", &["hot", "new"]).unwrap_err().kind, ErrorKind::BadInput);
+	}
+
+	#[test]
+	fn accepts_url_safe_cursors() {
+		assert_eq!(validate_cursor(" WTI5dGJXVnVkSFJ5 ").unwrap(), "WTI5dGJXVnVkSFJ5");
+		assert_eq!(validate_cursor("a-_b==").unwrap(), "a-_b==");
+	}
+
+	#[test]
+	fn rejects_cursors_that_could_inject_query_parameters() {
+		for bad in ["", "   ", "abc&x=1", "abc?x=1", "abc/def", "abc%20def", "abc+def"] {
+			assert_eq!(validate_cursor(bad).unwrap_err().kind, ErrorKind::BadInput, "accepted {bad:?}");
+		}
+		assert_eq!(validate_cursor(&"a".repeat(MAX_CURSOR_LEN + 1)).unwrap_err().kind, ErrorKind::BadInput);
+		assert!(validate_cursor(&"a".repeat(MAX_CURSOR_LEN)).is_ok());
 	}
 }
