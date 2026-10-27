@@ -14,6 +14,28 @@ pub fn clamp_limit(limit: Option<u32>) -> u32 {
 	limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
+pub const DEFAULT_COMMENTS: u32 = 50;
+
+/// A comment budget is a node count, so it gets the same cap as a listing
+/// `limit`. The two surfaces disagreed before: REST clamped the upstream fetch
+/// but then walked the raw `max_comments`, and MCP clamped neither.
+pub fn clamp_comments(count: Option<u32>) -> u32 {
+	count.unwrap_or(DEFAULT_COMMENTS).clamp(1, MAX_LIMIT)
+}
+
+/// Percent-encode a value for use in a Reddit query string. Everything outside the
+/// unreserved set is encoded, so a caller cannot smuggle an `&` or `=` into the path.
+pub fn encode(value: &str) -> String {
+	let mut out = String::with_capacity(value.len());
+	for byte in value.bytes() {
+		match byte {
+			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+			_ => out.push_str(&format!("%{byte:02X}")),
+		}
+	}
+	out
+}
+
 pub fn validate_query(query: &str) -> Result<String, RedditError> {
 	let trimmed = query.trim();
 	if trimmed.is_empty() {
@@ -132,6 +154,16 @@ mod tests {
 		assert_eq!(clamp_limit(Some(0)), 1);
 		assert_eq!(clamp_limit(Some(500)), 100);
 		assert_eq!(clamp_limit(Some(42)), 42);
+	}
+
+	/// The comment budget is a node count walked by the renderer, so an unbounded
+	/// `max_comments` is a caller-controlled amount of work.
+	#[test]
+	fn clamps_comment_budget_into_range() {
+		assert_eq!(clamp_comments(None), DEFAULT_COMMENTS);
+		assert_eq!(clamp_comments(Some(0)), 1);
+		assert_eq!(clamp_comments(Some(u32::MAX)), MAX_LIMIT);
+		assert_eq!(clamp_comments(Some(42)), 42);
 	}
 
 	#[test]

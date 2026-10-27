@@ -6,7 +6,7 @@
 
 use crate::errors::{map_client_err, ErrorKind, RedditError};
 use crate::normalize::{listing_out, post_and_comments};
-use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_comment_id, validate_cursor, validate_post_id, validate_query};
+use crate::params::{clamp_comments, clamp_limit, encode, require_allowed, sanitize_name, validate_comment_id, validate_cursor, validate_post_id, validate_query};
 use crate::{client::json, server::RequestExt, utils::param};
 use hyper::header::{HeaderValue, AUTHORIZATION, WWW_AUTHENTICATE};
 use hyper::{Body, Request, Response};
@@ -44,9 +44,12 @@ pub(crate) fn bearer_matches(header: Option<&str>, expected: &str) -> bool {
 		return false;
 	}
 	let (a, b) = (credential.as_bytes(), expected.as_bytes());
-	let mut diff = (a.len() ^ b.len()) as u8;
-	for i in 0..a.len().min(b.len()) {
-		diff |= a[i] ^ b[i];
+	// Fold the length mismatch in first, then diff every byte of the longer
+	// credential. Looping only `min(len)` would stop comparing as soon as one side
+	// ran out, which reintroduces an oracle on length.
+	let mut diff = u8::from(a.len() != b.len());
+	for i in 0..a.len().max(b.len()) {
+		diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
 	}
 	diff == 0
 }
@@ -78,17 +81,6 @@ static BUCKET: LazyLock<Mutex<Bucket>> = LazyLock::new(|| Mutex::new(Bucket::new
 
 pub(crate) fn rate_limit_take() -> bool {
 	BUCKET.lock().unwrap_or_else(|e| e.into_inner()).take_at(Instant::now())
-}
-
-fn encode(value: &str) -> String {
-	let mut out = String::with_capacity(value.len());
-	for byte in value.bytes() {
-		match byte {
-			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
-			_ => out.push_str(&format!("%{byte:02X}")),
-		}
-	}
-	out
 }
 
 fn subreddit_path(sub: &str, sort: Option<&str>, time: Option<&str>, after: Option<&str>, limit: Option<u32>) -> Result<String, RedditError> {
@@ -139,7 +131,7 @@ fn search_path(query: &str, subreddit: Option<&str>, sort: Option<&str>, time: O
 
 fn post_path(id: &str, sort: Option<&str>, comment: Option<&str>, max_comments: Option<u32>, cursor: Option<&str>) -> Result<String, RedditError> {
 	let id = validate_post_id(id)?;
-	let mut parts: Vec<String> = vec![format!("limit={}", clamp_limit(max_comments))];
+	let mut parts: Vec<String> = vec![format!("limit={}", clamp_comments(max_comments))];
 	if let Some(sort) = sort {
 		parts.push(format!("sort={}", require_allowed(sort, SORTS_COMMENTS)?));
 	}
@@ -163,6 +155,10 @@ fn gate(req: &Request<Body>) -> Result<(), RedditError> {
 	let expected = token().ok_or_else(|| RedditError::new(ErrorKind::Unauthorized, "API is disabled"))?;
 	let header = req.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 	if !bearer_matches(header, &expected) {
+		// Credential guessing is otherwise invisible; log the target but never the
+		// presented credential. eprintln rather than the logger because the default
+		// filter hides anything below `error`.
+		eprintln!("api: rejected unauthenticated {} {}", req.method(), req.uri().path());
 		return Err(RedditError::new(ErrorKind::Unauthorized, "missing or invalid bearer token"));
 	}
 	if !rate_limit_take() {
@@ -233,7 +229,7 @@ pub async fn comments(req: Request<Body>) -> Result<Response<Body>, String> {
 		Err(e) => return err_response(e),
 	};
 	match crate::gql::thread(path, false).await {
-		Ok(v) => match post_and_comments(&v, max.unwrap_or(50).max(1) as usize) {
+		Ok(v) => match post_and_comments(&v, clamp_comments(max) as usize) {
 			Some(page) => json_response(200, serde_json::to_value(page).map_err(|e| e.to_string())?),
 			None => err_response(RedditError::new(ErrorKind::Unavailable, format!("no post with id {id}"))),
 		},
@@ -337,6 +333,16 @@ mod tests {
 		assert!(!bearer_matches(Some("Bearer  s3cret"), "s3cret"), "double space is not the token");
 		assert!(!bearer_matches(Some("Bearer s3cret "), "s3cret"), "trailing space is not the token");
 		assert!(!bearer_matches(Some("Bearer "), "s3cret"), "empty credential");
+	}
+
+	/// A longer credential that starts with the real token must fail, and the
+	/// comparison must not stop at the shorter of the two lengths.
+	#[test]
+	fn bearer_matches_compares_every_byte() {
+		assert!(!bearer_matches(Some("Bearer s3cretsuffix"), "s3cret"));
+		assert!(!bearer_matches(Some("Bearer s3cre"), "s3cret"));
+		let long = format!("Bearer {}", "x".repeat(300));
+		assert!(!bearer_matches(Some(&long), "s3cret"));
 	}
 
 	#[test]

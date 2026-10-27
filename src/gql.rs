@@ -42,7 +42,11 @@ pub async fn user(name: String) -> Result<Option<Value>, String> {
 
 /// Preserve the existing two-Listing response consumed by post::item. Fetch
 /// metadata first, so missing/private/quarantined posts retain their API errors.
-#[cached(size = 100, time = 30, result = true)]
+///
+/// Entries hold a whole thread payload (tens to hundreds of KB, much more for a
+/// large thread), so the count is deliberately small: the cache exists to absorb
+/// the burst of requests a page load generates, not to be a store.
+#[cached(size = 20, time = 30, result = true)]
 pub async fn thread(path: String, quarantine: bool) -> Result<Value, String> {
 	let (id, path_comment) = parse_path(&path).ok_or("Invalid post path")?;
 	// Callers that know the focused comment (the web routes, the REST API and the MCP

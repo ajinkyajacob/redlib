@@ -38,8 +38,9 @@ COPY --from=builder /redlib/target/x86_64-unknown-linux-musl/release/redlib /usr
 RUN adduser --home /nonexistent --no-create-home --disabled-password redlib
 USER redlib
 
-# Document that we intend to expose port 8080 to whoever runs the container
-EXPOSE 8080
+# Document that we intend to expose port 8080 (web + /api/v1) and 9090 (MCP HTTP,
+# used only when REDLIB_API_TOKEN is set) to whoever runs the container
+EXPOSE 8080 9090
 
 # Run a healthcheck every minute to make sure redlib is functional
 HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/settings || exit 1

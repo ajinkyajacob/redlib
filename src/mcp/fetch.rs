@@ -5,16 +5,7 @@ use serde_json::Value;
 static PACER: std::sync::LazyLock<Pacer> = std::sync::LazyLock::new(crate::mcp::pace::from_env);
 
 /// Percent-encode a value for use in a Reddit query string.
-pub fn encode(value: &str) -> String {
-	let mut out = String::with_capacity(value.len());
-	for byte in value.bytes() {
-		match byte {
-			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
-			_ => out.push_str(&format!("%{byte:02X}")),
-		}
-	}
-	out
-}
+pub use crate::params::encode;
 
 pub async fn get(path: &str) -> Result<Value, RedditError> {
 	PACER.wait().await;

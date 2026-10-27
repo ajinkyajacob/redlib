@@ -160,7 +160,7 @@ async fn inner_post(args: PostArgs) -> Result<PostPage, RedditError> {
 		path.push_str(&format!("&comment={}", fetch::encode(&validate_comment_id(comment_id)?)));
 	}
 	let value = fetch::post(&path).await?;
-	post_and_comments(&value, args.max_comments.unwrap_or(50) as usize).ok_or_else(|| RedditError::new(ErrorKind::Unavailable, format!("no post at r/{sub} for id {id}")))
+	post_and_comments(&value, clamp_comments(args.max_comments) as usize).ok_or_else(|| RedditError::new(ErrorKind::Unavailable, format!("no post at r/{sub} for id {id}")))
 }
 
 async fn inner_user(args: UserArgs) -> Result<ListingOut, RedditError> {

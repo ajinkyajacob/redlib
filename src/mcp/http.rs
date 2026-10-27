@@ -11,6 +11,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -18,6 +19,7 @@ use http_body_util::{BodyExt, Full};
 use hyper1::body::Incoming;
 use hyper1::header::{HeaderValue, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE};
 use hyper1::{Request, Response, StatusCode};
+use hyper_util::rt::TokioTimer;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::json;
@@ -28,6 +30,11 @@ use crate::mcp::tools::RedlibServer;
 
 /// Hosts accepted by `rmcp`'s DNS-rebinding guard when `REDLIB_MCP_ALLOWED_HOSTS` is unset.
 const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
+
+/// A client that opens a connection and never finishes its request headers must not
+/// be able to pin a task forever. The web listener is hyper 0.14, which applies its
+/// own default; this listener has to opt in.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Parses `REDLIB_MCP_HTTP_PORT`: `"off"` disables the listener, a `u16` selects the port,
 /// and anything else is an error so a typo cannot silently fall back to the default.
@@ -74,14 +81,17 @@ pub async fn serve(bind: String, token: String) -> Result<(), Box<dyn std::error
 		let svc = service.clone();
 		let token = token.clone();
 		tokio::spawn(async move {
-			let conn = hyper1::server::conn::http1::Builder::new().serve_connection(
-				io,
-				hyper1::service::service_fn(move |req| {
-					let svc = svc.clone();
-					let token = token.clone();
-					async move { Ok::<_, Infallible>(dispatch(svc, token, req).await) }
-				}),
-			);
+			let conn = hyper1::server::conn::http1::Builder::new()
+				.timer(TokioTimer::new())
+				.header_read_timeout(HEADER_READ_TIMEOUT)
+				.serve_connection(
+					io,
+					hyper1::service::service_fn(move |req| {
+						let svc = svc.clone();
+						let token = token.clone();
+						async move { Ok::<_, Infallible>(dispatch(svc, token, req).await) }
+					}),
+				);
 			if let Err(e) = conn.await {
 				eprintln!("MCP HTTP connection error: {e}");
 			}
@@ -100,6 +110,9 @@ async fn dispatch(service: StreamableHttpService<RedlibServer, LocalSessionManag
 
 	let header = req.headers().get(AUTHORIZATION).and_then(|value| value.to_str().ok());
 	if !bearer_matches(header, &token) {
+		// Same reasoning as the REST gate: eprintln so the default log filter does
+		// not hide rejected credentials, and never print the credential itself.
+		eprintln!("mcp: rejected unauthenticated {}", req.uri().path());
 		return error_response(RedditError::new(ErrorKind::Unauthorized, "missing or invalid bearer token"));
 	}
 
