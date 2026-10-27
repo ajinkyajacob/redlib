@@ -147,7 +147,7 @@ async fn inner_subreddit(args: SubredditArgs) -> Result<ListingOut, RedditError>
 async fn inner_post(args: PostArgs) -> Result<PostPage, RedditError> {
 	let (sub, id) = match (args.url.as_deref(), args.post_id.as_deref(), args.subreddit.as_deref()) {
 		(Some(url), _, _) => parse_post_url(url)?,
-		(_, Some(id), Some(sub)) => (sanitize_name(sub)?, sanitize_name(id)?),
+		(_, Some(id), Some(sub)) => (sanitize_name(sub)?, validate_post_id(id)?),
 		_ => return Err(RedditError::new(ErrorKind::BadInput, "provide subreddit + post_id, or a full reddit.com url")),
 	};
 	let mut path = format!("/comments/{id}.json?depth=10&limit=100&raw_json=1");

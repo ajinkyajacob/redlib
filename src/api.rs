@@ -6,7 +6,7 @@
 
 use crate::errors::{map_client_err, ErrorKind, RedditError};
 use crate::normalize::{listing_out, post_and_comments};
-use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_cursor, validate_query};
+use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_cursor, validate_post_id, validate_query};
 use crate::{client::json, server::RequestExt, utils::param};
 use hyper::header::{HeaderValue, AUTHORIZATION, WWW_AUTHENTICATE};
 use hyper::{Body, Request, Response};
@@ -138,7 +138,7 @@ fn search_path(query: &str, subreddit: Option<&str>, sort: Option<&str>, time: O
 }
 
 fn post_path(id: &str, sort: Option<&str>, comment: Option<&str>, max_comments: Option<u32>, cursor: Option<&str>) -> Result<String, RedditError> {
-	let id = sanitize_name(id)?;
+	let id = validate_post_id(id)?;
 	let mut parts: Vec<String> = vec![format!("limit={}", clamp_limit(max_comments))];
 	if let Some(sort) = sort {
 		parts.push(format!("sort={}", require_allowed(sort, SORTS_COMMENTS)?));
@@ -421,5 +421,18 @@ mod tests {
 	fn post_path_rejects_injected_cursor() {
 		let e = post_path("abc123", None, None, Some(10), Some("abc&raw_json=0")).unwrap_err();
 		assert_eq!(e.kind, ErrorKind::BadInput);
+	}
+
+	#[test]
+	fn post_path_rejects_a_malformed_post_id() {
+		// `sanitize_name` would accept this and the GraphQL path parser would then
+		// report the caller's typo as an upstream failure.
+		assert_eq!(post_path("bad-id", None, None, None, None).unwrap_err().kind, ErrorKind::BadInput);
+		assert_eq!(post_path("", None, None, None, None).unwrap_err().kind, ErrorKind::BadInput);
+	}
+
+	#[test]
+	fn post_path_rejects_a_padded_cursor() {
+		assert_eq!(post_path("abc123", None, None, None, Some("abc==")).unwrap_err().kind, ErrorKind::BadInput);
 	}
 }

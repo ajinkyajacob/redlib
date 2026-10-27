@@ -223,10 +223,7 @@ fn prune_bfs(roots: Vec<CommentOut>, budget: usize) -> (Vec<CommentOut>, usize) 
 	}
 	let roots_out: Vec<CommentOut> = {
 		let mut slots: Vec<Option<Flat>> = flat.into_iter().map(Some).collect();
-		root_positions
-			.into_iter()
-			.filter_map(|position| rebuild(position, &mut slots, &kept))
-			.collect()
+		root_positions.into_iter().filter_map(|position| rebuild(position, &mut slots, &kept)).collect()
 	};
 	let comments_returned = count_nodes(&roots_out);
 	debug_assert_eq!(comments_returned, count, "prune_bfs emitted a tree that disagrees with its budget count");

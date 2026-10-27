@@ -80,6 +80,9 @@ impl RedditError {
 	}
 }
 
+/// Classifies the strings produced by `client::json` and `gql::thread`. The latter
+/// reports caller mistakes and missing posts as prose, so those phrases are
+/// recognised here rather than being lumped into `Parse` (502).
 pub fn map_client_err(message: String) -> RedditError {
 	// client::json appends " | {path}" to every error; scanning the path makes a
 	// post id or a subreddit like /r/401k look like a 401/404 status.
@@ -89,7 +92,9 @@ pub fn map_client_err(message: String) -> RedditError {
 		ErrorKind::RateLimited
 	} else if lower.contains("oauth") || lower.contains("unauthorized") || lower.contains("401") || lower.contains("token") {
 		ErrorKind::TokenStale
-	} else if lower.contains("removed") || lower.contains("404") {
+	} else if lower.contains("invalid post path") || lower.contains("invalid post id") || lower.contains("invalid cursor") || lower.contains("invalid comments cursor") {
+		ErrorKind::BadInput
+	} else if lower.contains("not found") || lower.contains("no post") || lower.contains("removed") || lower.contains("404") {
 		ErrorKind::Unavailable
 	} else if lower.contains("error sending request") || lower.contains("connection") || lower.contains("dns") || lower.contains("timed out") {
 		ErrorKind::Down
@@ -194,5 +199,18 @@ mod tests {
 	#[test]
 	fn unknown_text_falls_back_to_parse() {
 		assert_eq!(map_client_err("something odd".into()).kind, ErrorKind::Parse);
+	}
+
+	#[test]
+	fn maps_missing_post_to_unavailable() {
+		assert_eq!(map_client_err("Post not found".into()).kind, ErrorKind::Unavailable);
+		assert_eq!(map_client_err("no post with id zzz".into()).kind, ErrorKind::Unavailable);
+	}
+
+	#[test]
+	fn maps_caller_mistakes_to_bad_input() {
+		// gql::thread reports these as prose; they are 400s, not upstream failures.
+		assert_eq!(map_client_err("Invalid post path".into()).kind, ErrorKind::BadInput);
+		assert_eq!(map_client_err("Invalid comments cursor".into()).kind, ErrorKind::BadInput);
 	}
 }

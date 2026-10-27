@@ -45,14 +45,33 @@ pub fn require_allowed<'a>(value: &str, allowed: &[&'a str]) -> Result<&'a str, 
 		.ok_or_else(|| RedditError::new(ErrorKind::BadInput, format!("{value:?} is not one of {}", allowed.join(", "))))
 }
 
+pub const MAX_POST_ID_LEN: usize = 16;
+
+/// Reddit post ids are base36, so `_` and `-` are never valid even though
+/// [`sanitize_name`] accepts them. Without this check an id like `bad-id` reaches
+/// the rendering layer, which rejects the path and reports it as an upstream
+/// failure instead of the caller mistake it is.
+pub fn validate_post_id(id: &str) -> Result<String, RedditError> {
+	let trimmed = id.trim();
+	let ok = !trimmed.is_empty() && trimmed.len() <= MAX_POST_ID_LEN && trimmed.bytes().all(|b| b.is_ascii_alphanumeric());
+	if ok {
+		Ok(trimmed.to_owned())
+	} else {
+		Err(RedditError::new(ErrorKind::BadInput, format!("invalid post id: {id:?}")))
+	}
+}
+
 pub const MAX_CURSOR_LEN: usize = 8192;
 
 /// Cursors are opaque URL-safe base64 strings echoed back by Reddit. Validate the
 /// alphabet so a caller cannot smuggle extra query parameters into the upstream
 /// path.
+///
+/// Padding is rejected: the GraphQL layer decodes with the unpadded engine, so a
+/// `=` here would pass validation and then fail upstream as a 502 instead of a 400.
 pub fn validate_cursor(cursor: &str) -> Result<String, RedditError> {
 	let trimmed = cursor.trim();
-	let ok = !trimmed.is_empty() && trimmed.len() <= MAX_CURSOR_LEN && trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'='));
+	let ok = !trimmed.is_empty() && trimmed.len() <= MAX_CURSOR_LEN && trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
 	if ok {
 		Ok(trimmed.to_owned())
 	} else {
@@ -82,10 +101,8 @@ pub fn parse_post_url(url: &str) -> Result<(String, String), RedditError> {
 		return Err(RedditError::new(ErrorKind::BadInput, "URL is not a post permalink"));
 	}
 	let id = parts.next().ok_or_else(|| RedditError::new(ErrorKind::BadInput, "missing post id"))?;
-	if id.is_empty() || id.len() > 16 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
-		return Err(RedditError::new(ErrorKind::BadInput, format!("invalid post id: {id:?}")));
-	}
-	Ok((sub, id.to_owned()))
+	let id = validate_post_id(id)?;
+	Ok((sub, id))
 }
 
 #[cfg(test)]
@@ -162,7 +179,7 @@ mod tests {
 	#[test]
 	fn accepts_url_safe_cursors() {
 		assert_eq!(validate_cursor(" WTI5dGJXVnVkSFJ5 ").unwrap(), "WTI5dGJXVnVkSFJ5");
-		assert_eq!(validate_cursor("a-_b==").unwrap(), "a-_b==");
+		assert_eq!(validate_cursor("a-_b").unwrap(), "a-_b");
 	}
 
 	#[test]
@@ -172,5 +189,25 @@ mod tests {
 		}
 		assert_eq!(validate_cursor(&"a".repeat(MAX_CURSOR_LEN + 1)).unwrap_err().kind, ErrorKind::BadInput);
 		assert!(validate_cursor(&"a".repeat(MAX_CURSOR_LEN)).is_ok());
+	}
+
+	/// The decoder in `gql.rs` is `URL_SAFE_NO_PAD`, so padding can never round-trip.
+	/// Accepting it here would turn a caller error into a 502 from the upstream layer.
+	#[test]
+	fn rejects_padded_cursors() {
+		for bad in ["abc=", "abc==", "a-_b=="] {
+			assert_eq!(validate_cursor(bad).unwrap_err().kind, ErrorKind::BadInput, "accepted {bad:?}");
+		}
+	}
+
+	#[test]
+	fn validates_post_ids() {
+		assert_eq!(validate_post_id("abc123").unwrap(), "abc123");
+		assert_eq!(validate_post_id(" 1xdp2ww ").unwrap(), "1xdp2ww");
+		for bad in ["", "  ", "bad-id", "abc_123", "abc/123", "abc?x=1", "русский"] {
+			assert_eq!(validate_post_id(bad).unwrap_err().kind, ErrorKind::BadInput, "accepted {bad:?}");
+		}
+		assert_eq!(validate_post_id(&"a".repeat(MAX_POST_ID_LEN + 1)).unwrap_err().kind, ErrorKind::BadInput);
+		assert!(validate_post_id(&"a".repeat(MAX_POST_ID_LEN)).is_ok());
 	}
 }
