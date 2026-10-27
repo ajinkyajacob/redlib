@@ -13,12 +13,32 @@ use chrono::DateTime;
 use serde_json::{json as json_value, Value};
 use std::time::Duration;
 
-const GQL_URL: &str = "https://gql-fed.reddit.com/";
+const GQL_HOSTS: [&str; 2] = ["https://gql-fed.reddit.com/", "https://cf.gql-fed.reddit.com/"];
 // Android PostComments persisted operation; raw GraphQL queries are rejected.
 // https://github.com/Amqx/reddit-gql/blob/main/src/operations.ts
 const POST_COMMENTS_HASH: &str = "314f29c2494fd78c7844ef2c6b09acb4bef5b37ab50b4ddc01691d6d5c8433f8";
+// Android UserProfile persisted operation, from com.reddit.frontpage 2026.43.0.
+const USER_PROFILE_HASH: &str = "a05c628c5469c6b107c85988a8b1d0b79a2e7b6150ebd3a449c67e226e975ddc";
 const COMMENT_COUNT: u32 = 200;
 const MAX_DEPTH: u32 = 10;
+
+/// A Redditor's profile. The anonymous `/user/{name}/about.json` endpoint
+/// answers 403, so user pages read the same GraphQL surface the app uses.
+/// `Ok(None)` means Reddit has no Redditor by that name.
+#[cached(size = 200, time = 60, result = true)]
+pub async fn user(name: String) -> Result<Option<Value>, String> {
+	let body = json_value!({
+	 "operationName": "UserProfile",
+	 "variables": { "name": name, "includePremiumAvatarTreatment": false },
+	 "extensions": { "persistedQuery": { "version": 1, "sha256Hash": USER_PROFILE_HASH } }
+	});
+	let response = query(&body).await?;
+	let info = &response["data"]["redditorInfoByName"];
+	if info.is_null() {
+		return Ok(None);
+	}
+	Ok(Some(info.clone()))
+}
 
 /// Preserve the existing two-Listing response consumed by post::item. Fetch
 /// metadata first, so missing/private/quarantined posts retain their API errors.
@@ -96,29 +116,40 @@ fn variables(id: &str, comment_id: Option<&str>, path: &str, sort: &str) -> Resu
 }
 
 async fn query(body: &Value) -> Result<Value, String> {
-	for attempt in 0..2 {
-		let mut builder = CLIENT.post(GQL_URL).timeout(Duration::from_secs(20));
-		for (key, value) in &OAUTH_CLIENT.load_full().headers_map {
-			if !key.eq_ignore_ascii_case("content-type") {
-				builder = builder.header(key, value);
+	let mut last_error = String::from("Reddit GraphQL request failed");
+	// gql-fed answers both hostnames identically; the Cloudflare one keeps
+	// working when the primary host is unreachable.
+	for _ in 0..2 {
+		for host in GQL_HOSTS {
+			match request(host, body).await {
+				Ok(response) => {
+					// Upstream sometimes times out individual fields while returning HTTP 200.
+					if response["errors"].as_array().is_some_and(|errors| !errors.is_empty()) {
+						last_error = format!("Reddit GraphQL API error: {}", response["errors"]);
+					} else {
+						return Ok(response);
+					}
+				}
+				Err(e) => last_error = e,
 			}
 		}
-		let response = builder.json(body).send().await.map_err(|e| format!("Reddit comments request failed: {e}"))?;
-		let status = response.status();
-		if !status.is_success() {
-			return Err(format!("Reddit comments request returned {status}"));
-		}
-		let response: Value = response.json().await.map_err(|_| "Reddit returned an invalid comments response")?;
-		// Upstream sometimes times out individual fields while returning HTTP 200.
-		if response["errors"].as_array().is_some_and(|errors| !errors.is_empty()) {
-			if attempt == 0 {
-				continue;
-			}
-			return Err(format!("Reddit comments API error: {}", response["errors"]));
-		}
-		return Ok(response);
 	}
-	unreachable!()
+	Err(last_error)
+}
+
+async fn request(host: &str, body: &Value) -> Result<Value, String> {
+	let mut builder = CLIENT.post(host).timeout(Duration::from_secs(20));
+	for (key, value) in &OAUTH_CLIENT.load_full().headers_map {
+		if !key.eq_ignore_ascii_case("content-type") {
+			builder = builder.header(key, value);
+		}
+	}
+	let response = builder.json(body).send().await.map_err(|e| format!("Reddit request failed: {e}"))?;
+	let status = response.status();
+	if !status.is_success() {
+		return Err(format!("Reddit request returned {status}"));
+	}
+	response.json().await.map_err(|_| "Reddit returned an invalid response".to_string())
 }
 
 fn comment_listing(response: &Value, post_id: &str) -> Result<Value, String> {

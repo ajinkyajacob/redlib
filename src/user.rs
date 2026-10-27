@@ -7,7 +7,8 @@ use askama::Template;
 use chrono::DateTime;
 use htmlescape::decode_html;
 use hyper::{Body, Request, Response};
-use time::{macros::format_description, OffsetDateTime};
+use serde_json::Value;
+use time::{macros::format_description, Date, OffsetDateTime};
 
 // STRUCTS
 #[derive(Template)]
@@ -106,6 +107,20 @@ pub async fn profile(req: Request<Body>) -> Result<Response<Body>, String> {
 
 // USER
 async fn user(name: &str) -> Result<User, String> {
+	// The anonymous `/user/{name}/about.json` endpoint answers 403, so read the
+	// profile from the GraphQL surface the Android app uses, and keep the JSON
+	// endpoint as a fallback for the day the GraphQL one goes away.
+	match crate::gql::user(name.to_owned()).await {
+		Ok(Some(info)) => Ok(user_from_graphql(&info, name)),
+		Ok(None) => Err(format!("no Redditor named {name}")),
+		Err(e) => {
+			log::warn!("Falling back to the user JSON endpoint: {e}");
+			user_json(name).await
+		}
+	}
+}
+
+async fn user_json(name: &str) -> Result<User, String> {
 	// Build the Reddit JSON API path
 	let path: String = format!("/user/{name}/about.json?raw_json=1");
 
@@ -130,6 +145,37 @@ async fn user(name: &str) -> Result<User, String> {
 			nsfw: res["data"]["subreddit"]["over_18"].as_bool().unwrap_or_default(),
 		}
 	})
+}
+
+/// Map the `UserProfile` GraphQL object onto the fields the templates use.
+fn user_from_graphql(info: &Value, fallback_name: &str) -> User {
+	let profile = &info["profile"];
+	let styles = &profile["styles"];
+	let text = |value: &Value| value.as_str().unwrap_or_default().to_string();
+	let name = text(&info["name"]);
+
+	User {
+		name: if name.is_empty() { fallback_name.to_owned() } else { name },
+		title: text(&profile["title"]),
+		// legacyIcon is the 256px version of the avatar; icon is 64px.
+		icon: format_url(styles["legacyIcon"]["url"].as_str().filter(|url| !url.is_empty()).or_else(|| styles["icon"].as_str()).unwrap_or_default()),
+		karma: info["karma"]["total"].as_i64().unwrap_or_default(),
+		created: graphql_date(profile["createdAt"].as_str()),
+		banner: text(&profile["styles"]["profileBanner"]),
+		description: text(&profile["publicDescriptionText"]),
+		nsfw: profile["isNsfw"].as_bool().unwrap_or_default(),
+	}
+}
+
+fn graphql_date(created: Option<&str>) -> String {
+	// Reddit sends either RFC 3339 (`2005-06-06T09:30:00+05:30`) or the compact
+	// form with microseconds (`2005-06-06T04:00:00.000000+0000`). Only the date
+	// is displayed, so parse that and skip the offset entirely.
+	created
+		.and_then(|created| created.get(..10))
+		.and_then(|date| Date::parse(date, format_description!("[year]-[month]-[day]")).ok())
+		.and_then(|date| date.format(format_description!("[month repr:short] [day] '[year repr:last_two]")).ok())
+		.unwrap_or_default()
 }
 
 pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -186,11 +232,83 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use serde_json::json;
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_fetching_user() {
 		let user = user("spez").await;
 		assert!(user.is_ok());
 		assert!(user.unwrap().karma > 100);
+	}
+
+	#[test]
+	fn maps_graphql_profile_onto_user() {
+		let info = json!({
+			"name": "spez",
+			"karma": { "total": 941124 },
+			"profile": {
+				"title": "spez",
+				"createdAt": "2005-06-06T09:30:00+05:30",
+				"publicDescriptionText": "Reddit CEO",
+				"isNsfw": false,
+				"styles": {
+					"icon": "https://styles.redditmedia.com/icon64.png",
+					"legacyIcon": { "url": "https://styles.redditmedia.com/icon256.png" },
+					"profileBanner": "https://styles.redditmedia.com/banner.png"
+				}
+			}
+		});
+
+		let user = user_from_graphql(&info, "fallback");
+
+		assert_eq!(user.name, "spez");
+		assert_eq!(user.title, "spez");
+		assert_eq!(user.karma, 941124);
+		assert_eq!(user.icon, "/style/icon256.png");
+		assert_eq!(user.banner, "https://styles.redditmedia.com/banner.png");
+		assert_eq!(user.description, "Reddit CEO");
+		assert!(!user.nsfw);
+		assert_eq!(user.created, "Jun 06 '05");
+	}
+
+	#[test]
+	fn graphql_profile_defaults_when_fields_are_missing() {
+		let user = user_from_graphql(&json!({ "profile": {} }), "someone");
+
+		assert_eq!(user.name, "someone");
+		assert_eq!(user.title, "");
+		assert_eq!(user.karma, 0);
+		assert_eq!(user.icon, "");
+		assert_eq!(user.banner, "");
+		assert_eq!(user.description, "");
+		assert!(!user.nsfw);
+		assert_eq!(user.created, "");
+	}
+
+	#[test]
+	fn graphql_profile_prefers_legacy_icon_and_falls_back_to_small_icon() {
+		let only_small = json!({ "profile": { "styles": { "icon": "https://styles.redditmedia.com/icon64.png" } } });
+		assert_eq!(user_from_graphql(&only_small, "x").icon, "/style/icon64.png");
+	}
+
+	#[test]
+	fn graphql_profile_treats_null_description_as_empty() {
+		let info = json!({ "profile": { "publicDescriptionText": null, "styles": { "profileBanner": null } } });
+		let user = user_from_graphql(&info, "x");
+		assert_eq!(user.description, "");
+		assert_eq!(user.banner, "");
+	}
+
+	#[test]
+	fn graphql_profile_parses_microsecond_timestamps_with_compact_offsets() {
+		// ProfileDetailsByName returns this shape; UserProfile returns RFC 3339.
+		let info = json!({ "profile": { "createdAt": "2005-06-06T04:00:00.000000+0000" } });
+		assert_eq!(user_from_graphql(&info, "x").created, "Jun 06 '05");
+	}
+
+	#[test]
+	fn graphql_profile_ignores_an_unparseable_created_date() {
+		let info = json!({ "profile": { "createdAt": "not a date" } });
+		assert_eq!(user_from_graphql(&info, "x").created, "");
 	}
 }
