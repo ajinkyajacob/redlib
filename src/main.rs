@@ -300,6 +300,7 @@ async fn main() {
 	app
 		.at("/u/:name")
 		.get(|r| async move { Ok(redirect(&format!("/user/{}", r.param("name").unwrap_or_default()))) }.boxed());
+	app.at("/u/:name/comments/:id").get(|r| post::item(r).boxed());
 	app.at("/u/:name/comments/:id/:title").get(|r| post::item(r).boxed());
 	app.at("/u/:name/comments/:id/:title/:comment_id").get(|r| post::item(r).boxed());
 

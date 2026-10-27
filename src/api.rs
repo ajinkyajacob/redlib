@@ -6,7 +6,7 @@
 
 use crate::errors::{map_client_err, ErrorKind, RedditError};
 use crate::normalize::{listing_out, post_and_comments};
-use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_cursor, validate_post_id, validate_query};
+use crate::params::{clamp_limit, require_allowed, sanitize_name, validate_comment_id, validate_cursor, validate_post_id, validate_query};
 use crate::{client::json, server::RequestExt, utils::param};
 use hyper::header::{HeaderValue, AUTHORIZATION, WWW_AUTHENTICATE};
 use hyper::{Body, Request, Response};
@@ -146,7 +146,7 @@ fn post_path(id: &str, sort: Option<&str>, comment: Option<&str>, max_comments: 
 	if let Some(cursor) = cursor {
 		parts.push(format!("cursor={}", encode(&validate_cursor(cursor)?)));
 	} else if let Some(comment) = comment {
-		parts.push(format!("comment={}", encode(&sanitize_name(comment)?)));
+		parts.push(format!("comment={}", encode(&validate_comment_id(comment)?)));
 	}
 	Ok(format!("/comments/{id}.json?depth=10&{}", parts.join("&")))
 }
@@ -406,7 +406,8 @@ mod tests {
 		let p = post_path("abc123", Some("top"), Some("t1_more"), Some(50), None).unwrap();
 		assert!(p.starts_with("/comments/abc123.json?depth=10"), "{p}");
 		assert!(p.contains("&sort=top"), "{p}");
-		assert!(p.contains("&comment=t1_more"), "{p}");
+		// The GraphQL layer adds the `t1_` prefix itself, so it is stripped here.
+		assert!(p.contains("&comment=more"), "{p}");
 		assert!(p.contains("&limit=50"), "{p}");
 	}
 

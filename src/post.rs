@@ -29,8 +29,30 @@ struct PostTemplate {
 static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
 
 pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
-	// Build Reddit API path
-	let mut path: String = format!("{}.json?{}&raw_json=1", req.uri().path(), req.uri().query().unwrap_or_default());
+	// Build the canonical GraphQL path from the route parameters. A rendered
+	// permalink can carry a title segment (`/r/<sub>/comments/<id>/<title>`), which
+	// the positional parser in `gql` would otherwise read as a focused comment id,
+	// so the title never reaches it and the comment travels as a query parameter.
+	let query = req.uri().query().unwrap_or_default();
+	let comment = req
+		.param("comment_id")
+		.filter(|comment| !comment.is_empty())
+		.and_then(|comment| crate::params::validate_comment_id(&comment).ok());
+	let base = match req.param("id") {
+		Some(id) => format!("/comments/{id}"),
+		None => req.uri().path().to_owned(),
+	};
+	let build_path = |sort: Option<&str>| {
+		let mut path = format!("{base}.json?{query}&raw_json=1");
+		if let Some(sort) = sort {
+			path.push_str(&format!("&sort={sort}"));
+		}
+		if let Some(comment) = &comment {
+			path.push_str(&format!("&comment={comment}"));
+		}
+		path
+	};
+	let mut path = build_path(None);
 	let sub = req.param("sub").unwrap_or_default();
 	let quarantined = can_access_quarantine(&req, &sub);
 	let url = req.uri().to_string();
@@ -44,7 +66,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 		if default_sort.is_empty() {
 			String::new()
 		} else {
-			path = format!("{}.json?{}&sort={}&raw_json=1", req.uri().path(), req.uri().query().unwrap_or_default(), default_sort);
+			path = build_path(Some(&default_sort));
 			default_sort
 		}
 	});
@@ -53,8 +75,8 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	#[cfg(debug_assertions)]
 	req.param("id").unwrap_or_default();
 
-	let single_thread = req.param("comment_id").is_some();
-	let highlighted_comment = &req.param("comment_id").unwrap_or_default();
+	let single_thread = comment.is_some();
+	let highlighted_comment = comment.as_deref().unwrap_or_default();
 
 	// Send a request to the url, receive JSON in response
 	match crate::gql::thread(path, quarantined).await {

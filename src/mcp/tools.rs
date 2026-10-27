@@ -157,7 +157,7 @@ async fn inner_post(args: PostArgs) -> Result<PostPage, RedditError> {
 	if let Some(cursor) = args.cursor.as_deref() {
 		path.push_str(&format!("&cursor={}", fetch::encode(&validate_cursor(cursor)?)));
 	} else if let Some(comment_id) = args.comment_id.as_deref() {
-		path.push_str(&format!("&comment={}", fetch::encode(&sanitize_name(comment_id)?)));
+		path.push_str(&format!("&comment={}", fetch::encode(&validate_comment_id(comment_id)?)));
 	}
 	let value = fetch::post(&path).await?;
 	post_and_comments(&value, args.max_comments.unwrap_or(50) as usize).ok_or_else(|| RedditError::new(ErrorKind::Unavailable, format!("no post at r/{sub} for id {id}")))

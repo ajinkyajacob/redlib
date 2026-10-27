@@ -44,7 +44,10 @@ pub async fn user(name: String) -> Result<Option<Value>, String> {
 /// metadata first, so missing/private/quarantined posts retain their API errors.
 #[cached(size = 100, time = 30, result = true)]
 pub async fn thread(path: String, quarantine: bool) -> Result<Value, String> {
-	let (id, comment_id) = parse_path(&path).ok_or("Invalid post path")?;
+	let (id, path_comment) = parse_path(&path).ok_or("Invalid post path")?;
+	// Callers that know the focused comment (the web routes, the REST API and the MCP
+	// tool) pass it as `comment=`, so a title segment can never be mistaken for an id.
+	let comment_id = focused_comment(&path).or(path_comment);
 	let post = json(format!("/by_id/t3_{id}.json?raw_json=1"), quarantine).await?;
 	let metadata = post["data"]["children"].as_array().and_then(|p| p.first()).ok_or("Post not found")?;
 	let sort = param(&path, "sort")
@@ -197,11 +200,15 @@ fn parse_path(path: &str) -> Option<(String, Option<String>)> {
 	let tail = if let Some(tail) = base.strip_prefix("/comments/") {
 		tail
 	} else {
-		let (sub, rest) = base.strip_prefix("/r/")?.split_once('/')?;
-		if sub.is_empty() {
+		// `/r/<sub>`, `/u/<name>` and `/user/<name>` all prefix the same
+		// `comments/<id>` permalink shape; only the trailing id matters here.
+		let mut segments = base.trim_start_matches('/').splitn(3, '/');
+		let scope = segments.next()?;
+		let owner = segments.next()?;
+		if !matches!(scope, "r" | "u" | "user") || owner.is_empty() {
 			return None;
 		}
-		rest.strip_prefix("comments/")?
+		segments.next()?.strip_prefix("comments/")?
 	};
 	let parts: Vec<_> = tail.trim_end_matches('/').split('/').collect();
 	if parts.len() > 3 || !valid_id(parts[0]) {
@@ -216,6 +223,15 @@ fn parse_path(path: &str) -> Option<(String, Option<String>)> {
 
 fn valid_id(id: &str) -> bool {
 	!id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// The focused comment arrives as `comment=<id>` from the web routes, the REST API
+/// and the MCP tool. An unrecognisable value is ignored: focus is presentation, and
+/// the post itself must still render.
+fn focused_comment(path: &str) -> Option<String> {
+	param(path, "comment")
+		.map(|comment| comment.strip_prefix("t1_").unwrap_or(&comment).to_owned())
+		.filter(|comment| valid_id(comment))
 }
 
 /// Only HTTP(S) and local links may appear in rendered comment attributes.
@@ -482,9 +498,32 @@ mod tests {
 			"/comments/.json",
 			"/comments/a/title/b/extra.json",
 			"/comments/a%2fb.json",
+			"/search/comments/abc.json",
+			"/r/rust/abc.json",
 		] {
 			assert_eq!(parse_path(path), None, "{path}");
 		}
+	}
+
+	/// User profile permalinks used to be rejected outright, so `/u/<name>/comments/<id>`
+	/// and `/user/<name>/comments/<id>` rendered "Invalid post path".
+	#[test]
+	fn user_permalinks_resolve_to_the_post_id() {
+		for path in ["/u/spez/comments/1xdp2ww.json", "/user/spez/comments/1xdp2ww/.json", "/u/spez/comments/1xdp2ww/title/.json"] {
+			assert_eq!(parse_path(path), Some(("1xdp2ww".into(), None)), "{path}");
+		}
+		assert_eq!(parse_path("/user/spez/comments/1xdp2ww/title/abc.json"), Some(("1xdp2ww".into(), Some("abc".into()))));
+		for path in ["/u/spez/comments/.json", "/user/spez/comments/ab-cd.json", "/u//comments/abc.json"] {
+			assert_eq!(parse_path(path), None, "{path}");
+		}
+	}
+
+	#[test]
+	fn focused_comment_comes_from_the_query_parameter() {
+		assert_eq!(focused_comment("/comments/abc.json?comment=t1_def"), Some("def".into()));
+		assert_eq!(focused_comment("/comments/abc.json?comment=def"), Some("def".into()));
+		assert_eq!(focused_comment("/comments/abc.json?comment=bad-id"), None);
+		assert_eq!(focused_comment("/comments/abc.json?sort=top"), None);
 	}
 
 	#[test]

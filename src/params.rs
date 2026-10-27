@@ -47,17 +47,32 @@ pub fn require_allowed<'a>(value: &str, allowed: &[&'a str]) -> Result<&'a str, 
 
 pub const MAX_POST_ID_LEN: usize = 16;
 
-/// Reddit post ids are base36, so `_` and `-` are never valid even though
-/// [`sanitize_name`] accepts them. Without this check an id like `bad-id` reaches
-/// the rendering layer, which rejects the path and reports it as an upstream
-/// failure instead of the caller mistake it is.
+/// Post and comment ids are base36, so `_` and `-` are never valid even though
+/// [`sanitize_name`] accepts them.
+fn valid_id(id: &str) -> bool {
+	!id.is_empty() && id.len() <= MAX_POST_ID_LEN && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Without this check an id like `bad-id` reaches the GraphQL path parser, which
+/// rejects it and reports the caller's typo as an upstream failure.
 pub fn validate_post_id(id: &str) -> Result<String, RedditError> {
 	let trimmed = id.trim();
-	let ok = !trimmed.is_empty() && trimmed.len() <= MAX_POST_ID_LEN && trimmed.bytes().all(|b| b.is_ascii_alphanumeric());
-	if ok {
+	if valid_id(trimmed) {
 		Ok(trimmed.to_owned())
 	} else {
 		Err(RedditError::new(ErrorKind::BadInput, format!("invalid post id: {id:?}")))
+	}
+}
+
+/// Comment ids appear as `t1_<id>` in permalinks while the GraphQL layer prefixes
+/// `t1_` itself, so the prefix is accepted and removed here. Callers get the bare id.
+pub fn validate_comment_id(id: &str) -> Result<String, RedditError> {
+	let trimmed = id.trim();
+	let trimmed = trimmed.strip_prefix("t1_").unwrap_or(trimmed);
+	if valid_id(trimmed) {
+		Ok(trimmed.to_owned())
+	} else {
+		Err(RedditError::new(ErrorKind::BadInput, format!("invalid comment id: {id:?}")))
 	}
 }
 
@@ -209,5 +224,14 @@ mod tests {
 		}
 		assert_eq!(validate_post_id(&"a".repeat(MAX_POST_ID_LEN + 1)).unwrap_err().kind, ErrorKind::BadInput);
 		assert!(validate_post_id(&"a".repeat(MAX_POST_ID_LEN)).is_ok());
+	}
+
+	#[test]
+	fn validates_comment_ids_and_strips_the_type_prefix() {
+		assert_eq!(validate_comment_id("abc123").unwrap(), "abc123");
+		assert_eq!(validate_comment_id(" t1_abc123 ").unwrap(), "abc123");
+		for bad in ["", "t1_", "bad-id", "t1_bad-id", "t1_t1_abc", "abc/123"] {
+			assert_eq!(validate_comment_id(bad).unwrap_err().kind, ErrorKind::BadInput, "accepted {bad:?}");
+		}
 	}
 }
