@@ -147,6 +147,16 @@ async fn main() {
 				.num_args(1),
 		)
 		.arg(
+			Arg::new("mcp-http")
+				.long("mcp-http")
+				.value_name("PORT")
+				.env("REDLIB_MCP_HTTP_PORT")
+				.help("Port for the MCP Streamable HTTP listener, or 'off' to disable it")
+				.default_value("9090")
+				.action(ArgAction::Set)
+				.num_args(1),
+		)
+		.arg(
 			Arg::new("hsts")
 				.short('H')
 				.long("hsts")
@@ -155,7 +165,16 @@ async fn main() {
 				.default_value("604800")
 				.num_args(1),
 		)
+		.subcommand(Command::new("mcp").about("Serve MCP over stdio").version(env!("CARGO_PKG_VERSION")))
 		.get_matches();
+
+	if matches.subcommand_matches("mcp").is_some() {
+		if let Err(e) = redlib::mcp::stdio::serve().await {
+			eprintln!("mcp server error: {e}");
+			std::process::exit(1);
+		}
+		return;
+	}
 
 	match rate_limit_check().await {
 		Ok(()) => {
@@ -281,6 +300,7 @@ async fn main() {
 	app
 		.at("/u/:name")
 		.get(|r| async move { Ok(redirect(&format!("/user/{}", r.param("name").unwrap_or_default()))) }.boxed());
+	app.at("/u/:name/comments/:id").get(|r| post::item(r).boxed());
 	app.at("/u/:name/comments/:id/:title").get(|r| post::item(r).boxed());
 	app.at("/u/:name/comments/:id/:title/:comment_id").get(|r| post::item(r).boxed());
 
@@ -407,7 +427,7 @@ async fn main() {
 	});
 
 	// Default service in case no routes match
-	// Read-only JSON API (A3). Only registered when the kill switch is on.
+	// Read-only JSON API (A3). Only registered when REDLIB_API_TOKEN is set.
 	if redlib::api::enabled() {
 		app.at("/api/v1/health").get(|r| api::health(r).boxed());
 		app.at("/api/v1/r/:sub").get(|r| api::subreddit(r).boxed());
@@ -419,13 +439,75 @@ async fn main() {
 
 	app.at("/*").get(|req| error(req, "Nothing here").boxed());
 
+	let web_port: u16 = match port.parse() {
+		Ok(parsed) => parsed,
+		Err(_) => {
+			eprintln!("invalid web port: {port}");
+			std::process::exit(1);
+		}
+	};
+	let api_token = redlib::api::token();
+	let mcp_raw = matches.get_one::<String>("mcp-http").map(String::as_str).unwrap_or("9090");
+	let mcp_port = match &api_token {
+		None => None,
+		Some(_) => match redlib::mcp::http::resolve_port(mcp_raw) {
+			Ok(parsed) => parsed,
+			Err(e) => {
+				eprintln!("invalid REDLIB_MCP_HTTP_PORT: {e}");
+				std::process::exit(1);
+			}
+		},
+	};
+	if let Err(e) = ensure_distinct(web_port, mcp_port) {
+		eprintln!("{e}");
+		std::process::exit(1);
+	}
+
 	println!("Running Redlib v{} on {listener}!", env!("CARGO_PKG_VERSION"));
 
-	let server = app.listen(&listener);
+	let web = app.listen(&listener);
 
 	// Run this server for... forever!
-	if let Err(e) = server.await {
-		eprintln!("Server error: {e}");
+	match mcp_port {
+		None => {
+			if let Err(e) = web.await {
+				eprintln!("Server error: {e}");
+			}
+		}
+		Some(mcp_port) => {
+			let bind = if ipv4_only {
+				format!("0.0.0.0:{mcp_port}")
+			} else if ipv6_only {
+				format!("[::]:{mcp_port}")
+			} else {
+				format!("{address}:{mcp_port}")
+			};
+			let token = api_token.expect("token present when mcp_port is Some");
+			println!("MCP Streamable HTTP on {bind}/mcp");
+			tokio::select! {
+				result = web => {
+					if let Err(e) = result {
+						eprintln!("Server error: {e}");
+					}
+				}
+				result = redlib::mcp::http::serve(bind, token) => {
+					// Only a bind failure returns from `serve`; a listener that cannot
+					// start must not leave the process looking healthy.
+					if let Err(e) = result {
+						eprintln!("MCP server error: {e}");
+						std::process::exit(1);
+					}
+				}
+			}
+		}
+	}
+}
+
+/// Refuses to start when both listeners would race for the same port.
+fn ensure_distinct(web: u16, mcp: Option<u16>) -> Result<(), String> {
+	match mcp {
+		Some(port) if port == web => Err(format!("MCP port {port} equals the web port; set REDLIB_MCP_HTTP_PORT to a different port or 'off'")),
+		_ => Ok(()),
 	}
 }
 
@@ -461,4 +543,16 @@ async fn fetch_instances() -> String {
 	let url = "https://raw.githubusercontent.com/redlib-org/redlib-instances/refs/heads/main/instances.json";
 
 	CLIENT.get(url).send().await.expect("Failed to request GitHub").text().await.expect("Failed to read body")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn rejects_mcp_port_equal_to_web_port() {
+		assert!(ensure_distinct(9090, Some(9090)).is_err());
+		assert!(ensure_distinct(8080, Some(9090)).is_ok());
+		assert!(ensure_distinct(8080, None).is_ok());
+	}
 }

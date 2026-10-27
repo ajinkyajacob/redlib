@@ -1,3 +1,10 @@
+//! Single normalisation layer shared by the REST API and the MCP tools.
+//!
+//! Reddit's JSON is reshaped here exactly once, so the REST API and the MCP tools cannot
+//! drift apart in field names, caps, or comment-tree pruning. [`listing_out`] builds the
+//! [`ListingOut`] envelope (`ok` / `kind` / `result_count` / `cursor` / `posts`) that both
+//! surfaces return, which keeps listing responses byte-identical across them.
+
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -51,6 +58,8 @@ pub struct PostPage {
 	pub ok: bool,
 	pub kind: String,
 	pub post: PostOut,
+	/// Comment nodes actually present in `comments` after BFS pruning — not the number
+	/// present in the raw Reddit payload.
 	pub comments_returned: usize,
 	pub comments: Vec<CommentOut>,
 }
@@ -68,6 +77,8 @@ fn flair(data: &Value) -> Option<String> {
 	str_field(data, "link_flair_text").filter(|s| !s.trim().is_empty())
 }
 
+/// Truncates to `limit` characters and appends [`TRUNCATION_MARK`], so a truncated string is
+/// `limit` characters plus the mark — it can therefore exceed `limit` by the mark's length.
 fn cap(text: String, limit: usize) -> String {
 	if text.chars().count() > limit {
 		let head: String = text.chars().take(limit).collect();
@@ -91,7 +102,11 @@ pub fn normalize_post(data: &Value) -> Option<PostOut> {
 		score: int_field(data, "score"),
 		comment_count: int_field(data, "num_comments"),
 		created_utc: data.get("created_utc").and_then(Value::as_f64),
-		permalink: if permalink.starts_with("http") { permalink } else { format!("https://www.reddit.com{permalink}") },
+		permalink: if permalink.starts_with("http") {
+			permalink
+		} else {
+			format!("https://www.reddit.com{permalink}")
+		},
 		url,
 		flair: flair(data),
 		over_18: data.get("over_18").and_then(Value::as_bool).unwrap_or(false),
@@ -101,8 +116,14 @@ pub fn normalize_post(data: &Value) -> Option<PostOut> {
 }
 
 pub fn listing_posts(listing: &Value) -> Vec<PostOut> {
-	let Some(children) = listing.pointer("/data/children").and_then(Value::as_array) else { return Vec::new() };
-	children.iter().filter(|c| c.get("kind").and_then(Value::as_str) == Some("t3")).filter_map(|c| normalize_post(&c["data"])).collect()
+	let Some(children) = listing.pointer("/data/children").and_then(Value::as_array) else {
+		return Vec::new();
+	};
+	children
+		.iter()
+		.filter(|c| c.get("kind").and_then(Value::as_str) == Some("t3"))
+		.filter_map(|c| normalize_post(&c["data"]))
+		.collect()
 }
 
 pub fn cursor(listing: &Value) -> Option<String> {
@@ -141,49 +162,107 @@ fn normalize_comment(node: &Value) -> Option<CommentOut> {
 	})
 }
 
+/// Total nodes in a pruned tree, roots included.
+fn count_nodes(nodes: &[CommentOut]) -> usize {
+	nodes.iter().map(|n| 1 + count_nodes(&n.replies)).sum()
+}
+
 /// Breadth-first budget so a single deep thread cannot starve the rest of the page.
+///
+/// Nodes are addressed by their position in the flattened tree: Reddit sends an
+/// empty `id` for deleted comments, and keying by id would let one budget slot
+/// keep every deleted sibling.
 fn prune_bfs(roots: Vec<CommentOut>, budget: usize) -> (Vec<CommentOut>, usize) {
-	let mut kept: Vec<String> = Vec::new();
-	let mut level = roots.clone();
+	struct Flat {
+		comment: CommentOut,
+		children: Vec<usize>,
+	}
+
+	fn flatten(nodes: Vec<CommentOut>, flat: &mut Vec<Flat>) -> Vec<usize> {
+		let mut positions = Vec::with_capacity(nodes.len());
+		for mut node in nodes {
+			let position = flat.len();
+			let children = std::mem::take(&mut node.replies);
+			flat.push(Flat {
+				comment: node,
+				children: Vec::new(),
+			});
+			let child_positions = flatten(children, flat);
+			flat[position].children = child_positions;
+			positions.push(position);
+		}
+		positions
+	}
+
+	fn rebuild(position: usize, flat: &mut [Option<Flat>], kept: &[bool]) -> Option<CommentOut> {
+		if !kept[position] {
+			return None;
+		}
+		let Flat { comment, children } = flat[position].take()?;
+		let mut comment = comment;
+		comment.replies = children.into_iter().filter_map(|child| rebuild(child, flat, kept)).collect();
+		Some(comment)
+	}
+
+	let mut flat = Vec::new();
+	let root_positions = flatten(roots, &mut flat);
+	let mut kept = vec![false; flat.len()];
 	let mut count = 0;
+	let mut level = root_positions.clone();
 	while !level.is_empty() && count < budget {
 		let mut next = Vec::new();
-		for node in level {
+		for position in level {
 			if count >= budget {
 				break;
 			}
-			kept.push(node.id.clone());
+			kept[position] = true;
 			count += 1;
-			next.extend(node.replies);
+			next.extend(flat[position].children.iter().copied());
 		}
 		level = next;
 	}
-	fn rebuild(node: &mut CommentOut, kept: &[String]) {
-		let mut out = Vec::new();
-		for mut reply in std::mem::take(&mut node.replies) {
-			if kept.contains(&reply.id) {
-				rebuild(&mut reply, kept);
-				out.push(reply);
-			}
-		}
-		node.replies = out;
-	}
-	let mut roots_out = Vec::new();
-	for mut root in roots {
-		if kept.contains(&root.id) {
-			rebuild(&mut root, &kept);
-			roots_out.push(root);
-		}
-	}
-	(roots_out, count)
+	let roots_out: Vec<CommentOut> = {
+		let mut slots: Vec<Option<Flat>> = flat.into_iter().map(Some).collect();
+		root_positions.into_iter().filter_map(|position| rebuild(position, &mut slots, &kept)).collect()
+	};
+	let comments_returned = count_nodes(&roots_out);
+	debug_assert_eq!(comments_returned, count, "prune_bfs emitted a tree that disagrees with its budget count");
+	(roots_out, comments_returned)
 }
 
 pub fn post_and_comments(page: &Value, budget: usize) -> Option<PostPage> {
-	let post = page.get(0)?.pointer("/data/children")?.as_array()?.iter().find(|c| c.get("kind").and_then(Value::as_str) == Some("t3")).and_then(|c| normalize_post(&c["data"]))?;
+	let post = page
+		.get(0)?
+		.pointer("/data/children")?
+		.as_array()?
+		.iter()
+		.find(|c| c.get("kind").and_then(Value::as_str) == Some("t3"))
+		.and_then(|c| normalize_post(&c["data"]))?;
 	let raw = page.get(1).and_then(|c| c.pointer("/data/children")).and_then(Value::as_array).cloned().unwrap_or_default();
-	let roots: Vec<CommentOut> = raw.iter().filter(|c| c.get("kind").and_then(Value::as_str) == Some("t1")).filter_map(normalize_comment).collect();
+	let roots: Vec<CommentOut> = raw
+		.iter()
+		.filter(|c| c.get("kind").and_then(Value::as_str) == Some("t1"))
+		.filter_map(normalize_comment)
+		.collect();
 	let (comments, comments_returned) = prune_bfs(roots, budget.max(1));
-	Some(PostPage { ok: true, kind: "post".into(), post, comments_returned, comments })
+	Some(PostPage {
+		ok: true,
+		kind: "post".into(),
+		post,
+		comments_returned,
+		comments,
+	})
+}
+
+pub fn listing_out(listing: &Value) -> ListingOut {
+	let posts = listing_posts(listing);
+	ListingOut {
+		ok: true,
+		kind: "listing".into(),
+		result_count: posts.len(),
+		cursor: cursor(listing),
+		posts,
+	}
 }
 
 #[cfg(test)]
@@ -193,6 +272,38 @@ mod tests {
 
 	fn listing(children: serde_json::Value, after: Option<&str>) -> serde_json::Value {
 		json!({"kind": "Listing", "data": {"after": after, "children": children}})
+	}
+
+	/// A genuine chain `id -> id-0 -> id-1 -> ... -> id-{depth-1}` (`depth + 1` nodes).
+	fn deep(id: &str, depth: usize) -> serde_json::Value {
+		let mut node = json!({"kind": "t1", "data": {"id": format!("{id}-{}", depth - 1), "author": "u", "body": "b"}});
+		for level in (0..depth - 1).rev() {
+			let replies = json!({"kind": "Listing", "data": {"children": [node]}});
+			node = json!({"kind": "t1", "data": {"id": format!("{id}-{level}"), "author": "u", "body": "b", "replies": replies}});
+		}
+		let replies = json!({"kind": "Listing", "data": {"children": [node]}});
+		json!({"kind": "t1", "data": {"id": id, "author": "u", "body": "b", "replies": replies}})
+	}
+
+	fn collect_ids(nodes: &[CommentOut], ids: &mut Vec<String>) {
+		for n in nodes {
+			ids.push(n.id.clone());
+			collect_ids(&n.replies, ids);
+		}
+	}
+
+	#[test]
+	fn listing_out_builds_the_shared_envelope() {
+		let v = json!({"kind": "Listing", "data": {"after": "t3_x", "children": [
+			{"kind": "t3", "data": {"id": "abc123", "title": "Hello", "subreddit": "rust",
+									"permalink": "/r/rust/comments/abc123/hello/"}}
+		]}});
+		let out = listing_out(&v);
+		assert!(out.ok);
+		assert_eq!(out.kind, "listing");
+		assert_eq!(out.result_count, 1);
+		assert_eq!(out.cursor.as_deref(), Some("t3_x"));
+		assert_eq!(out.posts[0].permalink, "https://www.reddit.com/r/rust/comments/abc123/hello/");
 	}
 
 	#[test]
@@ -221,10 +332,13 @@ mod tests {
 
 	#[test]
 	fn flair_null_and_empty_both_become_none() {
-		let v = listing(json!([
-			{"kind": "t3", "data": {"id": "a", "title": "t", "subreddit": "s", "link_flair_text": null}},
-			{"kind": "t3", "data": {"id": "b", "title": "t", "subreddit": "s", "link_flair_text": ""}}
-		]), None);
+		let v = listing(
+			json!([
+				{"kind": "t3", "data": {"id": "a", "title": "t", "subreddit": "s", "link_flair_text": null}},
+				{"kind": "t3", "data": {"id": "b", "title": "t", "subreddit": "s", "link_flair_text": ""}}
+			]),
+			None,
+		);
 		let posts = listing_posts(&v);
 		assert_eq!(posts[0].flair, None);
 		assert_eq!(posts[1].flair, None);
@@ -232,19 +346,20 @@ mod tests {
 
 	#[test]
 	fn skips_children_without_id_or_title() {
-		let v = listing(json!([
-			{"kind": "t3", "data": {"title": "no id", "subreddit": "s"}},
-			{"kind": "t3", "data": {"id": "x", "subreddit": "s"}},
-			{"kind": "t3", "data": {"id": "ok", "title": "fine", "subreddit": "s"}}
-		]), None);
+		let v = listing(
+			json!([
+				{"kind": "t3", "data": {"title": "no id", "subreddit": "s"}},
+				{"kind": "t3", "data": {"id": "x", "subreddit": "s"}},
+				{"kind": "t3", "data": {"id": "ok", "title": "fine", "subreddit": "s"}}
+			]),
+			None,
+		);
 		assert_eq!(listing_posts(&v).len(), 1);
 	}
 
 	#[test]
 	fn builds_nested_comment_tree_with_more_ids() {
-		let comment = |id: &str, replies: serde_json::Value| {
-			json!({"kind": "t1", "data": {"id": id, "author": "u", "score": 1, "body": "b", "replies": replies}})
-		};
+		let comment = |id: &str, replies: serde_json::Value| json!({"kind": "t1", "data": {"id": id, "author": "u", "score": 1, "body": "b", "replies": replies}});
 		let more = json!({"kind": "more", "data": {"id": "t1_more", "count": 7, "children": ["a", "b"]}});
 		let c3 = comment("c3", json!({"kind": "Listing", "data": {"children": [more]}}));
 		let replies = json!({"kind": "Listing", "data": {"children": [comment("c2", json!({"kind": "Listing", "data": {"children": [c3]}}))]}});
@@ -277,17 +392,6 @@ mod tests {
 
 	#[test]
 	fn bfs_budget_keeps_shallow_comments_first() {
-		let deep = |id: &str, depth: usize| -> serde_json::Value {
-			let mut node = json!({"kind": "t1", "data": {"id": id, "author": "u", "body": "b"}});
-			for level in 0..depth {
-				let child = format!("{id}-{level}");
-				let replies = json!({"kind": "Listing", "data": {"children": [
-					json!({"kind": "t1", "data": {"id": child, "author": "u", "body": "b"}})
-				]}});
-				node = json!({"kind": "t1", "data": {"id": child, "author": "u", "body": "b", "replies": replies}});
-			}
-			node
-		};
 		let children: Vec<serde_json::Value> = (0..3).map(|i| deep(&format!("c{i}"), 3)).collect();
 		let v = json!([
 			{"kind": "Listing", "data": {"children": [
@@ -297,7 +401,58 @@ mod tests {
 		]);
 		let page = post_and_comments(&v, 4).expect("page");
 		assert_eq!(page.comments_returned, 4);
-		assert!(page.comments.iter().all(|c| c.replies.len() <= 1));
+		let mut ids = Vec::new();
+		collect_ids(&page.comments, &mut ids);
+		assert_eq!(ids, vec!["c0", "c0-0", "c1", "c2"]);
+		assert_eq!(page.comments_returned, ids.len());
+	}
+
+	#[test]
+	fn budget_boundaries_keep_everything_or_exactly_one_root() {
+		let page_of = |budget: usize| {
+			let children: Vec<serde_json::Value> = (0..3).map(|i| deep(&format!("c{i}"), 3)).collect();
+			let v = json!([
+				{"kind": "Listing", "data": {"children": [
+					json!({"kind": "t3", "data": {"id": "abc123", "title": "Post", "subreddit": "rust"}})
+				]}},
+				{"kind": "Listing", "data": {"children": children}}
+			]);
+			post_and_comments(&v, budget).expect("page")
+		};
+
+		let full = page_of(12);
+		assert_eq!(full.comments_returned, 12);
+		let mut all = Vec::new();
+		collect_ids(&full.comments, &mut all);
+		assert_eq!(all.len(), 12);
+		assert_eq!(full.comments_returned, all.len());
+
+		let one = page_of(1);
+		assert_eq!(one.comments_returned, 1);
+		assert_eq!(one.comments.len(), 1);
+		assert_eq!(one.comments[0].id, "c0");
+		assert!(one.comments[0].replies.is_empty());
+	}
+
+	#[test]
+	fn cap_returns_input_at_the_limit_and_truncates_one_over() {
+		let exact = "x".repeat(POST_BODY_CAP);
+		assert_eq!(super::cap(exact.clone(), POST_BODY_CAP), exact);
+		let over = "x".repeat(POST_BODY_CAP + 1);
+		let truncated = super::cap(over, POST_BODY_CAP);
+		assert!(truncated.ends_with(TRUNCATION_MARK));
+		assert_eq!(truncated.chars().count(), POST_BODY_CAP + TRUNCATION_MARK.chars().count());
+	}
+
+	#[test]
+	fn listing_out_on_empty_listing_is_ok_and_empty() {
+		let v = json!({"kind": "Listing", "data": {"children": []}});
+		let out = listing_out(&v);
+		assert!(out.ok);
+		assert_eq!(out.kind, "listing");
+		assert_eq!(out.result_count, 0);
+		assert_eq!(out.cursor, None);
+		assert!(out.posts.is_empty());
 	}
 
 	#[test]
@@ -317,5 +472,25 @@ mod tests {
 	fn returns_none_when_first_listing_has_no_post() {
 		let v = json!([{"kind": "Listing", "data": {"children": []}}, {"kind": "Listing", "data": {"children": []}}]);
 		assert!(post_and_comments(&v, 50).is_none());
+	}
+
+	/// Deleted comments reach the normalizer with an empty `id`. Pruning must not
+	/// treat them as one node, or a single budget slot keeps every deleted sibling.
+	#[test]
+	fn budget_spends_one_slot_per_deleted_comment() {
+		let deleted = || json!({"kind": "t1", "data": {"id": "", "author": "[deleted]", "body": "[deleted]"}});
+		let v = json!([
+			{"kind": "Listing", "data": {"children": [
+				json!({"kind": "t3", "data": {"id": "p1", "title": "Post", "subreddit": "rust"}})
+			]}},
+			{"kind": "Listing", "data": {"children": [
+				json!({"kind": "t1", "data": {"id": "c1", "author": "a", "body": "b", "replies": {
+					"kind": "Listing", "data": {"children": [deleted(), deleted(), deleted()]}
+				}}})
+			]}}
+		]);
+		let page = post_and_comments(&v, 2).expect("page");
+		assert_eq!(page.comments_returned, 2);
+		assert_eq!(count_nodes(&page.comments), 2);
 	}
 }

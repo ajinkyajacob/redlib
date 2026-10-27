@@ -9,7 +9,7 @@ authors = [
     "spikecodes <19519553+spikecodes@users.noreply.github.com>",
 ]
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.88"
 default-run = "redlib"
 
 [dependencies]
@@ -22,6 +22,10 @@ clap = { version = "4.4.11", default-features = false, features = [
     "std",
     "env",
     "derive",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
 ] }
 regex = "1.10.2"
 serde = { version = "1.0.193", features = ["derive"] }
@@ -61,6 +65,11 @@ revision = "0.17.0"
 fake_user_agent = "0.2.2"
 wreq = { version = "6.0.0-rc.28", features = ["brotli", "gzip", "deflate", "zstd", "json", "stream", "socks"] }
 wreq-util = { version = "3.0.0-rc.10" }
+rmcp = { version = "=3.5.1", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] } # exact pin: MCP protocol compatibility; bump deliberately
+hyper1 = { package = "hyper", version = "1", features = ["http1", "server"] } # MCP listener only: rmcp is http 1.x while web/REST stay on hyper 0.14
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
 
 [dev-dependencies]
 lipsum = "0.9.0"
@@ -71,6 +80,7 @@ codegen-units = 1
 lto = true
 strip = "symbols"
 
+# Workspace root: the explicit (empty) table stops cargo from adopting an
+# ancestor workspace when this checkout lives inside another repo or a git
+# worktree (for example `.worktrees/<name>`).
 [workspace]
-members = [".", "mcp"]
-resolver = "2"

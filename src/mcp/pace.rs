@@ -10,7 +10,10 @@ pub struct Pacer {
 
 impl Pacer {
 	pub fn new(min_ms: u64) -> Self {
-		Self { min: Duration::from_millis(min_ms), state: Mutex::new(None) }
+		Self {
+			min: Duration::from_millis(min_ms),
+			state: Mutex::new(None),
+		}
 	}
 
 	pub async fn wait(&self) {

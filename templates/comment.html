@@ -1,9 +1,13 @@
 {% import "utils.html" as utils %}
 
 {% if kind == "more" && parent_kind == "t1" %}
+{% if id != "" %}
+<a class="deeper_replies" href="{{ post_link }}{{ parent_id }}/?{% if comment_sort != "" %}sort={{ comment_sort }}&amp;{% endif %}cursor={{ id }}">&rarr; More replies ({{ more_count }})</a>
+{% else %}
 <a class="deeper_replies" href="{{ post_link }}{{ parent_id }}">&rarr; More replies ({{ more_count }})</a>
+{% endif %}
 {% else if kind == "t1" %}
-<div id="{{ id }}" class="comment">
+<div {% if id != "" %}id="{{ id }}" {% endif %}class="comment">
 	<div class="comment_left">
     <p class="comment_score" title="{{ score.1 }}">
          {% if prefs.hide_score != "on" %}
