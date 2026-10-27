@@ -19,6 +19,8 @@ const GQL_HOSTS: [&str; 2] = ["https://gql-fed.reddit.com/", "https://cf.gql-fed
 const POST_COMMENTS_HASH: &str = "314f29c2494fd78c7844ef2c6b09acb4bef5b37ab50b4ddc01691d6d5c8433f8";
 // Android UserProfile persisted operation, from com.reddit.frontpage 2026.43.0.
 const USER_PROFILE_HASH: &str = "a05c628c5469c6b107c85988a8b1d0b79a2e7b6150ebd3a449c67e226e975ddc";
+// Android SubredditInfoByName persisted operation, same APK.
+const SUBREDDIT_INFO_HASH: &str = "8c1815b07b762aee3c086cc84306f14b3907018e9ee152046c8e4d08ad4c7b88";
 const COMMENT_COUNT: u32 = 200;
 const MAX_DEPTH: u32 = 10;
 
@@ -35,6 +37,30 @@ pub async fn user(name: String) -> Result<Option<Value>, String> {
 	let response = query(&body).await?;
 	let info = &response["data"]["redditorInfoByName"];
 	if info.is_null() {
+		return Ok(None);
+	}
+	Ok(Some(info.clone()))
+}
+
+/// Subreddit metadata. `/r/{name}/about.json` still answers, but no longer
+/// reports active users, so the sidebar's numbers come from the operation the
+/// Android client uses. `Ok(None)` means the JSON endpoint should answer
+/// instead (unknown, banned, quarantined or multi-subreddit names).
+#[cached(size = 200, time = 60, result = true)]
+pub async fn subreddit(name: String) -> Result<Option<Value>, String> {
+	let body = json_value!({
+	 "operationName": "SubredditInfoByName",
+	 "variables": {
+	  "subredditName": name,
+	  "includeRecapFields": false,
+	  "includeDevvitData": false
+	 },
+	 "extensions": { "persistedQuery": { "version": 1, "sha256Hash": SUBREDDIT_INFO_HASH } }
+	});
+	let response = query(&body).await?;
+	let info = &response["data"]["subredditInfoByName"];
+	// Banned and quarantined communities answer an UnavailableSubreddit object.
+	if info.is_null() || info["__typename"] != "Subreddit" {
 		return Ok(None);
 	}
 	Ok(Some(info.clone()))

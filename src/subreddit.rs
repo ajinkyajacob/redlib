@@ -9,6 +9,7 @@ use askama::Template;
 use cookie::Cookie;
 use htmlescape::decode_html;
 use hyper::{Body, Request, Response};
+use serde_json::Value;
 
 use chrono::DateTime;
 use regex::Regex;
@@ -560,6 +561,20 @@ pub async fn sidebar(req: Request<Body>) -> Result<Response<Body>, String> {
 
 // SUBREDDIT
 async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
+	// The JSON endpoint still answers for a plain community, but it stopped
+	// reporting active users and Reddit keeps retiring these routes, so read
+	// the same GraphQL object the Android app uses.
+	match crate::gql::subreddit(sub.to_owned()).await {
+		Ok(Some(info)) => Ok(subreddit_from_graphql(&info, sub)),
+		Ok(None) => subreddit_json(sub, quarantined).await,
+		Err(e) => {
+			log::warn!("Falling back to the subreddit JSON endpoint: {e}");
+			subreddit_json(sub, quarantined).await
+		}
+	}
+}
+
+async fn subreddit_json(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
 	// Build the Reddit JSON API url
 	let path: String = format!("/r/{sub}/about.json?raw_json=1");
 
@@ -586,6 +601,48 @@ async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
 		wiki: res["data"]["wiki_enabled"].as_bool().unwrap_or_default(),
 		nsfw: res["data"]["over18"].as_bool().unwrap_or_default(),
 	})
+}
+
+/// Map the `SubredditInfoByName` GraphQL object onto the sidebar fields.
+fn subreddit_from_graphql(info: &Value, fallback_name: &str) -> Subreddit {
+	let text = |value: &Value| value.as_str().unwrap_or_default().to_string();
+	let name = text(&info["name"]);
+	let members = count(&info["subscribersCount"]);
+	let active = count(&info["communityStats"]["weeklyActiveUsersCount"]);
+	// `icon` is the current community icon; `legacyIcon` is the old one.
+	let styles = &info["styles"];
+	let icon = styles["icon"].as_str().filter(|url| !url.is_empty()).or_else(|| styles["legacyIcon"]["url"].as_str()).unwrap_or_default();
+
+	Subreddit {
+		name: if name.is_empty() { fallback_name.to_owned() } else { name },
+		title: text(&info["title"]),
+		description: text(&info["publicDescriptionText"]),
+		info: markdown_html(info["description"]["markdown"].as_str()),
+		icon: format_url(icon),
+		members: format_num(members),
+		active: format_num(active),
+		// Communities whose wiki is switched off report WIKI_DISABLED. A missing
+		// index page (PAGE_NOT_FOUND) still means the wiki itself is enabled.
+		wiki: info["wiki"]["indexPage"]["status"].as_str().is_some_and(|status| status != "WIKI_DISABLED"),
+		nsfw: info["isNsfw"].as_bool().unwrap_or_default(),
+	}
+}
+
+/// Reddit serialises large counters as scientific notation (`5.9991186e+07`),
+/// which `as_i64` rejects.
+fn count(value: &Value) -> i64 {
+	value.as_i64().or_else(|| value.as_f64().map(|count| count.round() as i64)).unwrap_or_default()
+}
+
+/// Render the GraphQL sidebar markdown the way `description_html` used to arrive.
+fn markdown_html(markdown: Option<&str>) -> String {
+	let Some(markdown) = markdown.filter(|markdown| !markdown.is_empty()) else {
+		return String::new();
+	};
+
+	let mut html = String::new();
+	pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(markdown));
+	rewrite_urls(&format!("<!-- SC_OFF --><div class=\"md\">{html}</div><!-- SC_ON -->"))
 }
 
 pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -718,11 +775,103 @@ fn get_mime_type(url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use serde_json::json;
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_fetching_subreddit() {
-		let subreddit = subreddit("rust", false).await;
-		assert!(subreddit.is_ok());
+		let subreddit = subreddit("rust", false).await.unwrap();
+		assert_eq!(subreddit.name, "rust");
+		assert!(subreddit.members.1.parse::<i64>().unwrap() > 100_000);
+		// `/r/{sub}/about.json` no longer reports accounts_active, so a zero here
+		// means the page fell back to the dying JSON endpoint.
+		assert_ne!(subreddit.active.1, "0", "expected weekly active users from GraphQL");
+		assert!(subreddit.wiki);
+	}
+
+	#[test]
+	fn maps_graphql_subreddit_onto_subreddit() {
+		let info = json!({
+			"__typename": "Subreddit",
+			"name": "rust",
+			"title": "The Rust Programming Language",
+			"publicDescriptionText": "A place for Rust",
+			"subscribersCount": 428167,
+			"communityStats": { "weeklyActiveUsersCount": 154512, "weeklyContributionsCount": 2964 },
+			"styles": {
+				"icon": "https://styles.redditmedia.com/t5_2s7lj/styles/communityIcon.png?width=64",
+				"legacyIcon": { "url": "https://b.thumbs.redditmedia.com/legacy.png" }
+			},
+			"wiki": { "indexPage": { "status": "VALID" } },
+			"isNsfw": true
+		});
+
+		let sub = subreddit_from_graphql(&info, "fallback");
+
+		assert_eq!(sub.name, "rust");
+		assert_eq!(sub.title, "The Rust Programming Language");
+		assert_eq!(sub.description, "A place for Rust");
+		assert_eq!(sub.icon, "/style/t5_2s7lj/styles/communityIcon.png?width=64");
+		assert_eq!(sub.members, ("428.2k".to_string(), "428167".to_string()));
+		assert_eq!(sub.active, ("154.5k".to_string(), "154512".to_string()));
+		assert!(sub.wiki);
+		assert!(sub.nsfw);
+	}
+
+	#[test]
+	fn graphql_subreddit_renders_markdown_sidebar_and_rewrites_reddit_links() {
+		let info = json!({
+			"description": {
+				"markdown": "### Rules\n\n- Be **nice**\n- Read [the wiki](https://www.reddit.com/r/rust/wiki/index)\n"
+			}
+		});
+
+		let info = subreddit_from_graphql(&info, "rust").info;
+
+		assert!(info.contains(r#"<div class="md">"#), "sidebar needs the markdown wrapper: {info}");
+		assert!(info.contains("<h3>Rules</h3>"), "{info}");
+		assert!(info.contains("<strong>nice</strong>"), "{info}");
+		assert!(info.contains(r#"href="/r/rust/wiki/index""#), "{info}");
+		assert!(!info.contains("reddit.com"), "{info}");
+	}
+
+	#[test]
+	fn graphql_subreddit_falls_back_to_the_legacy_icon() {
+		let info = json!({ "styles": { "legacyIcon": { "url": "https://styles.redditmedia.com/legacy.png" } } });
+		assert_eq!(subreddit_from_graphql(&info, "x").icon, "/style/legacy.png");
+	}
+
+	#[test]
+	fn graphql_subreddit_counts_a_missing_index_page_as_an_enabled_wiki() {
+		let info = json!({ "wiki": { "indexPage": { "status": "PAGE_NOT_FOUND" } } });
+		assert!(subreddit_from_graphql(&info, "x").wiki);
+	}
+
+	#[test]
+	fn graphql_subreddit_reports_a_disabled_wiki() {
+		let info = json!({ "wiki": { "indexPage": { "status": "WIKI_DISABLED" } } });
+		assert!(!subreddit_from_graphql(&info, "x").wiki);
+	}
+
+	#[test]
+	fn graphql_subreddit_reads_scientific_notation_subscriber_counts() {
+		// AskReddit's 59,991,186 subscribers arrive as 5.9991186e+07.
+		let info = json!({ "subscribersCount": 5.9991186e7 });
+		assert_eq!(subreddit_from_graphql(&info, "x").members.1, "59991186");
+	}
+
+	#[test]
+	fn graphql_subreddit_defaults_when_fields_are_missing() {
+		let sub = subreddit_from_graphql(&json!({}), "someone");
+
+		assert_eq!(sub.name, "someone");
+		assert_eq!(sub.title, "");
+		assert_eq!(sub.description, "");
+		assert_eq!(sub.info, "");
+		assert_eq!(sub.icon, "");
+		assert_eq!(sub.members, ("0".to_string(), "0".to_string()));
+		assert_eq!(sub.active, ("0".to_string(), "0".to_string()));
+		assert!(!sub.wiki);
+		assert!(!sub.nsfw);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
