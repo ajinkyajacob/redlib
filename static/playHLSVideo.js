@@ -45,6 +45,7 @@
 
             function initializeHls() {
                 newVideo.removeEventListener('play', initializeHls);
+                newVideo.removeEventListener('click', initializeHls);
                 var hls = new Hls({ autoStartLoad: false });
                 hls.loadSource(playlist);
                 hls.attachMedia(newVideo);
@@ -110,6 +111,11 @@
             }
 
             newVideo.addEventListener('play', initializeHls);
+            // The native play button is not always reachable: a video whose
+            // poster failed to load collapses to its 100px min-width, which is
+            // too narrow for the control bar. Starting on a click anywhere on
+            // the surface gives the element a second way in.
+            newVideo.addEventListener('click', initializeHls);
 
             if (autoplay) {
                 newVideo.play();
