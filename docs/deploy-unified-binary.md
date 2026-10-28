@@ -186,3 +186,90 @@ ssh host 'sudo systemctl restart redlib'
 `Restart=always` and `systemctl enable` keep it up across reboots. Replacing the
 binary under a running service is safe on Linux — the old inode stays mapped
 until the restart.
+
+## 7. Clients: OpenCode
+
+The deployed endpoint is a plain streamable-HTTP MCP server behind bearer auth:
+
+```
+https://example.org/redlib/mcp
+Authorization: Bearer $TOKEN
+```
+
+It exposes `reddit_subreddit`, `reddit_post`, `reddit_search`, `reddit_user`.
+`REDLIB_API_TOKEN` guards it and `REDLIB_MCP_ALLOWED_HOSTS` must name the public
+hostname, otherwise the `Host` check answers `403` before auth runs.
+
+### Register it
+
+```bash
+opencode mcp add redlib-oracle --global \
+  --url https://example.org/redlib/mcp \
+  --header 'Authorization=Bearer {file:~/.secrets/redlib-token}'
+```
+
+Store the token in a file with no trailing newline (`{file:...}` substitutes the
+raw bytes, so a newline ends up inside the header):
+
+```bash
+mkdir -p ~/.secrets
+printf '%s' "$TOKEN" > ~/.secrets/redlib-token
+chmod 600 ~/.secrets/redlib-token        # Windows: icacls <file> /inheritance:r /grant:r "$env:USERNAME:(R)"
+```
+
+Then set `"oauth": false` on the server entry. Remote servers default to OAuth;
+this endpoint only speaks bearer auth, so OpenCode otherwise tries to register a
+client and fails.
+
+Resulting `opencode.json`:
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "redlib-oracle": {
+        "type": "remote",
+        "url": "https://example.org/redlib/mcp",
+        "oauth": false,
+        "headers": {
+          "Authorization": "Bearer {file:~/.secrets/redlib-token}"
+        }
+      }
+    }
+  }
+}
+```
+
+`opencode mcp list` must be run from `$HOME`: the command resolves the config of
+the directory it starts in, so from a project subdirectory it prints
+`No MCP servers configured` even though the global entry exists.
+
+### Why not `{env:VAR}`
+
+Environment substitution works, but it fails silently in the worst way: an unset
+variable is replaced with an **empty string**, so the header becomes
+`Authorization: Bearer ` and the server answers `401 missing or invalid bearer
+token`. A background OpenCode server also resolves MCP config in its own process,
+so `setx`/`export` in a shell started earlier has no effect — the service has to
+be restarted before it sees the variable. `{file:...}` has no such ordering
+dependency.
+
+Symptom of a bad token, for reference:
+
+```
+✗ redlib-oracle  failed: Error POSTing to endpoint:
+  {"kind":"UNAUTHORIZED","message":"missing or invalid bearer token","ok":false} (HTTP 401)
+```
+
+### Verify a call
+
+`opencode mcp list` only proves the handshake. To prove the tools work, call one
+from a session:
+
+```
+tools["redlib-oracle"].reddit_subreddit({ subreddit: "rust", sort: "hot", limit: 3 })
+→ ok:true kind:"listing" count:3
+```
+
+Rotating the token means rewriting the file and restarting the OpenCode service;
+the config needs no edit.
