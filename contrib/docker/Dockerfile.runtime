@@ -1,0 +1,17 @@
+# Minimal runtime image for a prebuilt `redlib` binary.
+#
+# `debian:bookworm-slim` rather than `scratch`: the binary is dynamically linked
+# and needs glibc plus ca-certificates for TLS to Reddit. Build the binary on a
+# machine that can, copy it here as `redlib`, then `docker compose up -d --build`.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY redlib /usr/local/bin/redlib
+RUN chmod 0755 /usr/local/bin/redlib
+
+EXPOSE 8080 9091
+ENTRYPOINT ["/usr/local/bin/redlib"]

@@ -1,0 +1,43 @@
+version: "3"
+
+# Container deployment for a host that cannot build rust itself (low RAM, no
+# toolchain). Build the binary elsewhere and drop it next to this file as
+# `redlib`, then: docker compose up -d --build
+#
+# The service joins the reverse proxy's network and publishes nothing on the
+# host, so nginx is the only entrypoint. See contrib/nginx/redlib-subpath.conf.
+
+services:
+  redlib:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    image: redlib:local
+    container_name: redlib
+    restart: unless-stopped
+    env_file:
+      - redlib.env
+    environment:
+      RUST_LOG: info
+      REDLIB_MCP_HTTP_PORT: "9091"
+    command:
+      - --address
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --mcp-http
+      - "9091"
+    expose:
+      - "8080"
+      - "9091"
+    networks:
+      - proxy
+    # The web UI and the MCP listener together idle at ~15MB.
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  # `docker network create proxy` once, or point this at an existing one.
+  proxy:
+    external: true
