@@ -108,6 +108,12 @@ Two gotchas that bite on reload:
   after `nginx -s reload`. Rewrite in place (`python -c`, `tee`) or restart the
   container.
 
+Video needs one extra rewrite. Posters are emitted as `poster="/preview/..."`
+and appear in no other attribute, so they need their own `sub_filter` rule. Miss
+it and every poster 404s on the parent vhost, the `<video>` falls back to its
+100px `min-width`, and the native control bar no longer has room for a play
+button — the video looks broken and only the context menu's *Play* works.
+
 ## 5. Verify
 
 ```bash
@@ -133,8 +139,16 @@ Also check that every link the page emits carries the prefix:
 
 ```bash
 curl -s https://example.org/redlib/r/rust \
-  | grep -oE '(href|src|action)="/(redlib|#)?' | sort -u
+  | grep -oE '(href|src|action|poster)="/(redlib|#)?' | sort -u
 ```
+
+With `use_hls=on` (Settings → *Use HLS for videos*) each Reddit video is an
+`<video>` with no `src` of its own: `playHLSVideo.js` swaps in a clone, waits for
+the first `play` or `click`, then hands the manifest to hls.js. If a video shows
+a poster but will not start, check that `poster="/` is rewritten (above) and
+that `/redlib/hls/<id>/HLSPlaylist.m3u8?...` answers `200
+application/x-mpegurl` — the variant playlists and segments below it need no
+query string.
 
 ## 6. Updating
 
