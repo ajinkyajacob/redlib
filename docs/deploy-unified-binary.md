@@ -45,14 +45,12 @@ compiles C++ and C during the build.
 ```
 /opt/redlib/
 ├── redlib                 # the binary, mode 0755
-├── Dockerfile.runtime     # contrib/docker/Dockerfile.runtime
-├── compose.yaml           # contrib/docker/compose.yaml
-└── redlib.env             # secrets, mode 0600
+└── redlib.env             # secrets, mode 0600, root:root
 ```
 
 ```bash
 sudo install -d -o "$USER" /opt/redlib
-scp redlib Dockerfile.runtime compose.yaml host:/opt/redlib/
+scp redlib host:/opt/redlib/
 ```
 
 `/opt/redlib/redlib.env`:
@@ -61,6 +59,7 @@ scp redlib Dockerfile.runtime compose.yaml host:/opt/redlib/
 REDLIB_API_TOKEN=<openssl rand -hex 24>
 REDLIB_MCP_ALLOWED_HOSTS=example.org
 REDLIB_ROBOTS_DISABLE_INDEXING=on
+RUST_LOG=info
 ```
 
 - `REDLIB_API_TOKEN` gates `/api/v1` and MCP. Without it both answer `401`.
@@ -72,10 +71,14 @@ REDLIB_ROBOTS_DISABLE_INDEXING=on
 
 ## 3. Start it
 
+Install `contrib/systemd/redlib.service` as `/etc/systemd/system/redlib.service`
+and start it:
+
 ```bash
-cd /opt/redlib
-sudo docker compose up -d --build
-sudo docker logs -f redlib
+sudo install -m 0644 contrib/systemd/redlib.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now redlib
+sudo journalctl -fu redlib
 ```
 
 Expected start-up:
@@ -83,13 +86,32 @@ Expected start-up:
 ```
 INFO  redlib::oauth  > [✅] Successfully created OAuth client
 INFO  redlib         > [✅] Rate limit check passed
-Running Redlib v0.40.0 on 0.0.0.0:8080!
+Running Redlib v0.40.0 on 0.0.0.0:8090!
 MCP Streamable HTTP on 0.0.0.0:9091/mcp
 ```
 
-The container joins the proxy network and publishes no host ports, so nginx is
-the only way in. `mem_limit: 512m` is generous: the web UI and MCP listener
-together idle around 15MB.
+The unit runs the binary as a `DynamicUser` under `ProtectSystem=strict`,
+restarts on failure and caps memory at 512M (it idles around 12MB). Nothing is
+written to the filesystem, so no state directory is needed.
+
+Ports 8090/9091 are the host ports; the reverse proxy reaches them through the
+docker bridge. If the host's `INPUT` chain ends in a REJECT (Oracle Cloud images
+ship `-A INPUT -j REJECT --reject-with icmp-host-prohibited`, which drops
+everything but SSH), traffic from a container to the host gateway is dropped
+even though the socket is listening. The unit therefore inserts
+
+```
+-A INPUT -s 172.18.0.0/16 -p tcp --dport 8090 -j ACCEPT
+-A INPUT -s 172.18.0.0/16 -p tcp --dport 9091 -j ACCEPT
+```
+
+on start, so the rules survive a reboot without an `iptables-persistent`
+package. Adjust the subnet to the docker network nginx lives on.
+
+A container image is also provided (`contrib/docker/`) for hosts that cannot run
+the binary directly; it joins the proxy network with no published ports and is
+reached as `redlib:8080` / `redlib:9091` instead. Pick one — they serve the same
+ports and would collide.
 
 ## 4. Reverse proxy
 
@@ -97,6 +119,10 @@ Use `contrib/nginx/redlib-subpath.conf` to serve it under `/redlib/` on a
 vhost that already hosts something else. It rewrites redlib's root-relative
 URLs with `sub_filter`, proxies `/redlib/mcp` to the MCP listener, and leaves
 `/api/v1` alone (JSON needs no rewriting).
+
+Point the upstreams at wherever nginx can reach the process: `127.0.0.1:8090`
+and `127.0.0.1:9091` when nginx runs on the host, or the docker bridge gateway
+(`172.18.0.1:8090`, `172.18.0.1:9091`) when nginx itself is a container.
 
 Two gotchas that bite on reload:
 
@@ -153,10 +179,10 @@ query string.
 ## 6. Updating
 
 ```bash
-cd /opt/redlib
 scp new-redlib host:/opt/redlib/redlib
-sudo docker compose up -d --build     # rebuilds the 17MB runtime layer only
+ssh host 'sudo systemctl restart redlib'
 ```
 
-`restart: unless-stopped` and the compose health of the proxy network keep it
-up across reboots.
+`Restart=always` and `systemctl enable` keep it up across reboots. Replacing the
+binary under a running service is safe on Linux — the old inode stays mapped
+until the restart.

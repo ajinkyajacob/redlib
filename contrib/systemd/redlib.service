@@ -1,0 +1,40 @@
+[Unit]
+Description=Redlib (web UI + REST API + MCP HTTP)
+Documentation=https://github.com/redlib-org/redlib
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+
+# Secrets and instance settings (mode 0600, root:root). systemd reads this as
+# root and hands the variables to the service, so the sandboxed user never needs
+# access to the file.
+EnvironmentFile=/opt/redlib/redlib.env
+
+# nginx runs in a container on the `searxng` bridge, so it reaches this process
+# over the gateway address, not loopback. The host's INPUT chain ends in
+# `-j REJECT --reject-with icmp-host-prohibited`, which would drop that traffic,
+# so allow the bridge subnet on these two ports only. Idempotent: the service
+# re-adds the rules on every start, and they vanish only on reboot.
+ExecStartPre=+/bin/sh -c 'iptables -C INPUT -p tcp -s 172.18.0.0/16 --dport 8090 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp -s 172.18.0.0/16 --dport 8090 -j ACCEPT'
+ExecStartPre=+/bin/sh -c 'iptables -C INPUT -p tcp -s 172.18.0.0/16 --dport 9091 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp -s 172.18.0.0/16 --dport 9091 -j ACCEPT'
+
+ExecStart=/opt/redlib/redlib --address 0.0.0.0 --port 8090 --mcp-http 9091
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
