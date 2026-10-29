@@ -487,19 +487,6 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "todolol"]
-	async fn test_generic_web_backend() {
-		// Test GenericWebAuth backend specifically
-		let mut backend = GenericWebAuth::new();
-		let response = backend.authenticate().await;
-		assert!(response.is_ok());
-		let response = response.unwrap();
-		assert!(!response.token.is_empty());
-		assert!(response.expires_in > 0);
-		assert!(!backend.user_agent().is_empty());
-	}
-
-	#[tokio::test(flavor = "multi_thread")]
 	async fn test_oauth_client() {
 		// Integration test - tests the overall Oauth client
 		assert!(OAUTH_CLIENT.load_full().headers_map.contains_key("Authorization"));
