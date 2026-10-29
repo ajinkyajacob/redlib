@@ -121,7 +121,7 @@ fn user_path(name: &str, sort: Option<&str>, after: Option<&str>, limit: Option<
 	Ok(format!("/user/{name}/{sort}.json?{}", parts.join("&")))
 }
 
-fn search_path(query: &str, subreddit: Option<&str>, sort: Option<&str>, time: Option<&str>, limit: Option<u32>) -> Result<String, RedditError> {
+fn search_path(query: &str, subreddit: Option<&str>, sort: Option<&str>, time: Option<&str>, after: Option<&str>, limit: Option<u32>) -> Result<String, RedditError> {
 	let query = validate_query(query)?;
 	let mut parts: Vec<String> = vec![format!("q={}", encode(&query))];
 	if let Some(sort) = sort {
@@ -129,6 +129,9 @@ fn search_path(query: &str, subreddit: Option<&str>, sort: Option<&str>, time: O
 	}
 	if let Some(time) = time {
 		parts.push(format!("t={}", require_allowed(time, TIMES)?));
+	}
+	if let Some(after) = after {
+		parts.push(format!("after={}", encode(after)));
 	}
 	parts.push(format!("limit={}", clamp_limit(limit)));
 	parts.push("raw_json=1".into());
@@ -274,6 +277,7 @@ pub async fn search(req: Request<Body>) -> Result<Response<Body>, String> {
 		query(&req, "subreddit").as_deref(),
 		query(&req, "sort").as_deref(),
 		query(&req, "t").as_deref(),
+		query(&req, "after").as_deref(),
 		param_u32(&req, "limit"),
 	) {
 		Ok(p) => p,
@@ -457,12 +461,25 @@ mod tests {
 
 	#[test]
 	fn search_path_encodes_query_and_restricts_to_subreddit() {
-		let global = search_path("rust lang", None, None, None, None).unwrap();
+		let global = search_path("rust lang", None, None, None, None, None).unwrap();
 		assert!(global.starts_with("/search.json"), "{global}");
 		assert!(global.contains("q=rust%20lang"), "{global}");
 		assert!(global.contains("&limit=25"), "{global}");
-		let scoped = search_path("rust", Some("rust"), None, None, None).unwrap();
+		let scoped = search_path("rust", Some("rust"), None, None, None, None).unwrap();
 		assert!(scoped.starts_with("/r/rust/search.json?restrict_sr=on"), "{scoped}");
+	}
+
+	#[test]
+	fn search_path_encodes_the_after_cursor() {
+		let p = search_path("rust lang", None, None, None, Some("t3_a&b=c+d"), None).unwrap();
+		assert!(p.starts_with("/search.json?"), "{p}");
+		assert!(p.contains("after=t3_a%26b%3Dc%2Bd"), "{p}");
+	}
+
+	#[test]
+	fn search_path_omits_after_when_absent() {
+		let p = search_path("rust", None, None, None, None, None).unwrap();
+		assert!(!p.contains("after="), "{p}");
 	}
 
 	#[test]

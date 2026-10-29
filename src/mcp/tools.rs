@@ -23,6 +23,8 @@ pub struct SearchArgs {
 	pub subreddit: Option<String>,
 	pub sort: Option<String>,
 	pub time: Option<String>,
+	/// Cursor from a previous result's cursor field, to fetch the next page.
+	pub after: Option<String>,
 	pub limit: Option<u32>,
 }
 
@@ -123,6 +125,9 @@ async fn inner_search(args: SearchArgs) -> Result<ListingOut, RedditError> {
 	}
 	if let Some(time) = args.time.as_deref() {
 		path.push_str(&format!("&t={}", require_allowed(time, TIMES)?));
+	}
+	if let Some(after) = args.after.as_deref() {
+		path.push_str(&format!("&after={}", fetch::encode(after)));
 	}
 	path.push_str(&format!("&limit={}&raw_json=1", clamp_limit(args.limit)));
 	Ok(listing_result(&fetch::get(&path).await?))
