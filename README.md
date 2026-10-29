@@ -403,6 +403,7 @@ Redlib supports the following command line flags:
 - `-r`, `--redirect-https`: Redirect all HTTP requests to HTTPS (no longer functional).
 - `-a`, `--address <ADDRESS>`: Sets address to listen on. Default is `[::]`.
 - `-p`, `--port <PORT>`: Port to listen on. Default is `8080`.
+- `--mcp-http <PORT>`: MCP Streamable HTTP listener port, or `off` to disable it. Default is `9090`; only active when `REDLIB_API_TOKEN` is set. Also settable as `REDLIB_MCP_HTTP_PORT`.
 - `-H`, `--hsts <EXPIRE_TIME>`: HSTS header to tell browsers that this site should only be accessed over HTTPS. Default is `604800`.
 
 ## Instance settings
@@ -418,6 +419,9 @@ Assign a default value for each instance-specific setting by passing environment
 | `PORT`                    | Integer 0-65535 | `8080`                 | The **internal** port Redlib listens on.                                                                  |
 | `ENABLE_RSS`              | `["on", "off"]` | `off`                  | Enables RSS feed generation.                                                                              |
 | `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS)                                                      |
+| `API_TOKEN`               | String          | (empty)                | Enables the read-only `/api/v1` JSON API and the `/mcp` listener. Unset disables both.                  |
+| `MCP_HTTP_PORT`           | Integer 0-65535 or `off` | `9090`         | Port for the MCP Streamable HTTP listener. Only active when `REDLIB_API_TOKEN` is set.                    |
+| `MCP_ALLOWED_HOSTS`       | Comma-separated hosts | (empty)          | When set, requests whose `Host` is not listed receive `403`.                                              |
 
 ## Default user settings
 
@@ -457,7 +461,31 @@ Redlib [supports](https://docs.rs/wreq/latest/wreq/#proxies) proxy usage using t
 - `socks5://` is the scheme for socks5 proxy
 - `socks5h://` is the scheme for socks5h proxy
 
+## JSON API and MCP
+
+Setting `REDLIB_API_TOKEN` (see below) turns on two optional, read-only surfaces:
+
+- A **JSON API** under `/api/v1` with endpoints:
+  - `GET /api/v1/health` (no authentication, does not consume a token)
+  - `GET /api/v1/r/{sub}` (`sort`, `t`, `after`, `limit`)
+  - `GET /api/v1/r/{sub}/comments/{id}` (`sort`, `comment`, `cursor`, `max_comments`)
+  - `GET /api/v1/search` (`q`, `subreddit`, `sort`, `t`, `after`, `limit`)
+  - `GET /api/v1/u/{name}` (`sort`, `after`, `limit`)
+- A **Model Context Protocol** Streamable HTTP listener at `/mcp`, exposing
+  the tools `reddit_search`, `reddit_subreddit`, `reddit_post` and `reddit_user`.
+
+Authentication is `Authorization: Bearer <token>` compared in constant time;
+`401` responses carry `WWW-Authenticate: Bearer`. Requests are limited to a
+burst of 5 and then 30 per minute (shared by the API and MCP), and `429`
+responses carry `Retry-After: 5`. When `REDLIB_MCP_ALLOWED_HOSTS` is set,
+requests whose `Host` header is not listed are rejected with `403`.
+
+With the token unset, neither surface exists and `/api/v1` returns `404`.
+
+See `docs/deploy-unified-binary.md` for reverse-proxy and systemd wiring.
+
 ## Security
+
 
 This project uses [BoringSSL](https://boringssl.googlesource.com/boringssl/), built from source with patches from
 the [wreq](https://github.com/0x676e67/wreq) project. Certificates are validated against the embedded trust store from Mozilla.
