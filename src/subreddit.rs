@@ -612,7 +612,11 @@ fn subreddit_from_graphql(info: &Value, fallback_name: &str) -> Subreddit {
 	let active = count(&info["communityStats"]["weeklyActiveUsersCount"]);
 	// `icon` is the current community icon; `legacyIcon` is the old one.
 	let styles = &info["styles"];
-	let icon = styles["icon"].as_str().filter(|url| !url.is_empty()).or_else(|| styles["legacyIcon"]["url"].as_str()).unwrap_or_default();
+	let icon = styles["icon"]
+		.as_str()
+		.filter(|url| !url.is_empty())
+		.or_else(|| styles["legacyIcon"]["url"].as_str())
+		.unwrap_or_default();
 
 	Subreddit {
 		name: if name.is_empty() { fallback_name.to_owned() } else { name },

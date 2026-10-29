@@ -158,7 +158,13 @@ fn user_from_graphql(info: &Value, fallback_name: &str) -> User {
 		name: if name.is_empty() { fallback_name.to_owned() } else { name },
 		title: text(&profile["title"]),
 		// legacyIcon is the 256px version of the avatar; icon is 64px.
-		icon: format_url(styles["legacyIcon"]["url"].as_str().filter(|url| !url.is_empty()).or_else(|| styles["icon"].as_str()).unwrap_or_default()),
+		icon: format_url(
+			styles["legacyIcon"]["url"]
+				.as_str()
+				.filter(|url| !url.is_empty())
+				.or_else(|| styles["icon"].as_str())
+				.unwrap_or_default(),
+		),
 		karma: info["karma"]["total"].as_i64().unwrap_or_default(),
 		created: graphql_date(profile["createdAt"].as_str()),
 		banner: text(&profile["styles"]["profileBanner"]),

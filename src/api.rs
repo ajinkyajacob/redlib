@@ -14,8 +14,10 @@ use serde_json::{json, Value};
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
-const RATE_CAPACITY: f64 = 30.0;
+const RATE_PER_MINUTE: f64 = 30.0;
+const RATE_BURST: f64 = 5.0;
 const RATE_WINDOW_SECS: f64 = 60.0;
+pub(crate) const RETRY_AFTER_SECS: u64 = 5;
 
 const SORTS_LISTING: &[&str] = &["hot", "new", "top", "rising"];
 const SORTS_SEARCH: &[&str] = &["relevance", "hot", "top", "new", "comments"];
@@ -61,12 +63,15 @@ struct Bucket {
 
 impl Bucket {
 	fn new() -> Self {
-		Self { tokens: RATE_CAPACITY, last: Instant::now() }
+		Self {
+			tokens: RATE_BURST,
+			last: Instant::now(),
+		}
 	}
 
 	fn take_at(&mut self, now: Instant) -> bool {
 		let elapsed = now.duration_since(self.last).as_secs_f64();
-		self.tokens = (self.tokens + elapsed * RATE_CAPACITY / RATE_WINDOW_SECS).min(RATE_CAPACITY);
+		self.tokens = (self.tokens + elapsed * RATE_PER_MINUTE / RATE_WINDOW_SECS).min(RATE_BURST);
 		self.last = now;
 		if self.tokens >= 1.0 {
 			self.tokens -= 1.0;
@@ -81,6 +86,10 @@ static BUCKET: LazyLock<Mutex<Bucket>> = LazyLock::new(|| Mutex::new(Bucket::new
 
 pub(crate) fn rate_limit_take() -> bool {
 	BUCKET.lock().unwrap_or_else(|e| e.into_inner()).take_at(Instant::now())
+}
+
+pub(crate) fn rate_limited_error() -> RedditError {
+	RedditError::new(ErrorKind::RateLimited, "rate limit exceeded: 5 request burst, 30 requests/minute")
 }
 
 fn subreddit_path(sub: &str, sort: Option<&str>, time: Option<&str>, after: Option<&str>, limit: Option<u32>) -> Result<String, RedditError> {
@@ -162,18 +171,20 @@ fn gate(req: &Request<Body>) -> Result<(), RedditError> {
 		return Err(RedditError::new(ErrorKind::Unauthorized, "missing or invalid bearer token"));
 	}
 	if !rate_limit_take() {
-		return Err(RedditError::new(ErrorKind::RateLimited, "rate limit exceeded: 30 requests/minute"));
+		return Err(rate_limited_error());
 	}
 	Ok(())
 }
 
 fn json_response(status: u16, body: Value) -> Result<Response<Body>, String> {
-	Ok(Response::builder()
-		.status(status)
-		.header("content-type", "application/json")
-		.header("Cache-Control", "no-store")
-		.body(Body::from(body.to_string()))
-		.unwrap_or_default())
+	Ok(
+		Response::builder()
+			.status(status)
+			.header("content-type", "application/json")
+			.header("Cache-Control", "no-store")
+			.body(Body::from(body.to_string()))
+			.unwrap_or_default(),
+	)
 }
 
 fn err_response(e: RedditError) -> Result<Response<Body>, String> {
@@ -194,7 +205,7 @@ pub async fn health(_req: Request<Body>) -> Result<Response<Body>, String> {
 			"ok": true,
 			"kind": "health",
 			"version": env!("CARGO_PKG_VERSION"),
-			"rate_limit": { "capacity": 30, "window_seconds": 60 },
+			"rate_limit": { "burst": 5, "per_minute": 30, "retry_after_seconds": RETRY_AFTER_SECS },
 		}),
 	)
 }
@@ -208,7 +219,13 @@ pub async fn subreddit(req: Request<Body>) -> Result<Response<Body>, String> {
 		return err_response(e);
 	}
 	let sub = req.param("sub").unwrap_or_default();
-	let path = match subreddit_path(&sub, query(&req, "sort").as_deref(), query(&req, "t").as_deref(), query(&req, "after").as_deref(), param_u32(&req, "limit")) {
+	let path = match subreddit_path(
+		&sub,
+		query(&req, "sort").as_deref(),
+		query(&req, "t").as_deref(),
+		query(&req, "after").as_deref(),
+		param_u32(&req, "limit"),
+	) {
 		Ok(p) => p,
 		Err(e) => return err_response(e),
 	};
@@ -224,7 +241,13 @@ pub async fn comments(req: Request<Body>) -> Result<Response<Body>, String> {
 	}
 	let id = req.param("id").unwrap_or_default();
 	let max = param_u32(&req, "max_comments");
-	let path = match post_path(&id, query(&req, "sort").as_deref(), query(&req, "comment").as_deref(), max, query(&req, "cursor").as_deref()) {
+	let path = match post_path(
+		&id,
+		query(&req, "sort").as_deref(),
+		query(&req, "comment").as_deref(),
+		max,
+		query(&req, "cursor").as_deref(),
+	) {
 		Ok(p) => p,
 		Err(e) => return err_response(e),
 	};
@@ -241,7 +264,13 @@ pub async fn search(req: Request<Body>) -> Result<Response<Body>, String> {
 	if let Err(e) = gate(&req) {
 		return err_response(e);
 	}
-	let path = match search_path(&query(&req, "q").unwrap_or_default(), query(&req, "subreddit").as_deref(), query(&req, "sort").as_deref(), query(&req, "t").as_deref(), param_u32(&req, "limit")) {
+	let path = match search_path(
+		&query(&req, "q").unwrap_or_default(),
+		query(&req, "subreddit").as_deref(),
+		query(&req, "sort").as_deref(),
+		query(&req, "t").as_deref(),
+		param_u32(&req, "limit"),
+	) {
 		Ok(p) => p,
 		Err(e) => return err_response(e),
 	};
@@ -353,24 +382,35 @@ mod tests {
 	}
 
 	#[test]
-	fn rate_bucket_allows_capacity_then_blocks() {
+	fn rate_bucket_allows_burst_then_blocks() {
 		let mut bucket = Bucket::new();
 		let start = Instant::now();
-		for _ in 0..30 {
+		for _ in 0..5 {
 			assert!(bucket.take_at(start));
 		}
 		assert!(!bucket.take_at(start));
 	}
 
 	#[test]
-	fn rate_bucket_refills_over_window() {
+	fn rate_bucket_refills_one_token_per_two_seconds() {
 		let mut bucket = Bucket::new();
 		let start = Instant::now();
-		for _ in 0..30 {
+		for _ in 0..5 {
 			bucket.take_at(start);
 		}
 		assert!(!bucket.take_at(start));
-		assert!(bucket.take_at(start + Duration::from_secs(60)));
+		assert!(!bucket.take_at(start + Duration::from_secs(1)));
+		assert!(bucket.take_at(start + Duration::from_secs(2)));
+	}
+
+	#[test]
+	fn idle_bucket_never_exceeds_the_burst_cap() {
+		let mut bucket = Bucket::new();
+		let later = Instant::now() + Duration::from_secs(600);
+		for _ in 0..5 {
+			assert!(bucket.take_at(later));
+		}
+		assert!(!bucket.take_at(later));
 	}
 
 	#[test]

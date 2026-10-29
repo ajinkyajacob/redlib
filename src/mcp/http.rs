@@ -24,7 +24,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::json;
 
-use crate::api::{bearer_matches, rate_limit_take};
+use crate::api::{bearer_matches, rate_limit_take, rate_limited_error};
 use crate::errors::{ErrorKind, RedditError};
 use crate::mcp::tools::RedlibServer;
 
@@ -117,7 +117,7 @@ async fn dispatch(service: StreamableHttpService<RedlibServer, LocalSessionManag
 	}
 
 	if !rate_limit_take() {
-		return error_response(RedditError::new(ErrorKind::RateLimited, "rate limit exceeded: 30 requests/minute"));
+		return error_response(rate_limited_error());
 	}
 
 	service.handle(req).await

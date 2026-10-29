@@ -51,9 +51,9 @@ pub async fn subreddit(name: String) -> Result<Option<Value>, String> {
 	let body = json_value!({
 	 "operationName": "SubredditInfoByName",
 	 "variables": {
-	  "subredditName": name,
-	  "includeRecapFields": false,
-	  "includeDevvitData": false
+		"subredditName": name,
+		"includeRecapFields": false,
+		"includeDevvitData": false
 	 },
 	 "extensions": { "persistedQuery": { "version": 1, "sha256Hash": SUBREDDIT_INFO_HASH } }
 	});
