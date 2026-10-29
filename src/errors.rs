@@ -96,7 +96,8 @@ pub fn map_client_err(message: String) -> RedditError {
 		ErrorKind::BadInput
 	} else if lower.contains("not found") || lower.contains("no post") || lower.contains("removed") || lower.contains("404") {
 		ErrorKind::Unavailable
-	} else if lower.contains("error sending request") || lower.contains("connection") || lower.contains("dns") || lower.contains("timed out") {
+	} else if lower.contains("error sending request") || lower.contains("connection") || lower.contains("dns") || lower.contains("timed out") || lower.contains("having issues")
+	{
 		ErrorKind::Down
 	} else {
 		ErrorKind::Parse
@@ -212,5 +213,23 @@ mod tests {
 		// gql::thread reports these as prose; they are 400s, not upstream failures.
 		assert_eq!(map_client_err("Invalid post path".into()).kind, ErrorKind::BadInput);
 		assert_eq!(map_client_err("Invalid comments cursor".into()).kind, ErrorKind::BadInput);
+	}
+
+	#[test]
+	fn maps_upstream_forbidden_to_rate_limited() {
+		let e = map_client_err("Too many requests: Reddit returned 403 Forbidden: expected value at line 1 column 1 | /r/rust/hot.json".into());
+		assert_eq!(e.kind, ErrorKind::RateLimited);
+	}
+
+	#[test]
+	fn maps_upstream_429_to_rate_limited() {
+		let e = map_client_err("Too many requests: Reddit returned 429 Too Many Requests | /r/rust/hot.json".into());
+		assert_eq!(e.kind, ErrorKind::RateLimited);
+	}
+
+	#[test]
+	fn maps_outage_text_to_down() {
+		let e = map_client_err("Reddit is having issues, check if there's an outage: connection reset | /r/rust/hot.json".into());
+		assert_eq!(e.kind, ErrorKind::Down);
 	}
 }

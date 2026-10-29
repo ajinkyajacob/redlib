@@ -402,6 +402,18 @@ fn comments_logical_path(path: &str) -> String {
 	format!("/r/{subreddit}/comments/{tail}")
 }
 
+/// Translate an upstream Reddit HTTP status into a message map_client_err can
+/// classify. Returns None when the status is not one we translate, so the
+/// caller falls back to the generic parse-error path.
+fn upstream_status_message(status: u16, detail: &str) -> Option<String> {
+	match status {
+		401 => Some(format!("Unauthorized: Reddit rejected the OAuth token: {detail}")),
+		403 | 429 => Some(format!("Too many requests: Reddit returned {status}: {detail}")),
+		500..=599 => Some(format!("Reddit is having issues, check if there's an outage: {detail}")),
+		_ => None,
+	}
+}
+
 /// Make a request to a Reddit API and parse the JSON response
 #[cached(size = 100, time = 30, result = true)]
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
@@ -510,10 +522,9 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 						}
 						Err(e) => {
 							error!("Got an invalid response from reddit {e}. Status code: {status}");
-							if status.is_server_error() {
-								Err("Reddit is having issues, check if there's an outage".to_string())
-							} else {
-								err("Failed to parse page JSON data", e.to_string(), path)
+							match upstream_status_message(status.as_u16(), &e.to_string()) {
+								Some(msg) => Err(format!("{msg} | {path}")),
+								None => err("Failed to parse page JSON data", e.to_string(), path),
 							}
 						}
 					}
@@ -601,6 +612,15 @@ mod tests {
 		assert_eq!(reddit_dns_name("www.reddit.com"), ALTERNATIVE_REDDIT_DNS_HOST);
 		assert_eq!(reddit_dns_name("WWW.REDDIT.COM"), ALTERNATIVE_REDDIT_DNS_HOST);
 		assert_eq!(reddit_dns_name("oauth.reddit.com"), "oauth.reddit.com");
+	}
+
+	#[test]
+	fn upstream_status_message_only_translates_throttling_auth_and_outages() {
+		assert!(upstream_status_message(403, "x").unwrap().starts_with("Too many requests"));
+		assert!(upstream_status_message(429, "x").unwrap().starts_with("Too many requests"));
+		assert!(upstream_status_message(401, "x").unwrap().starts_with("Unauthorized"));
+		assert!(upstream_status_message(503, "x").unwrap().contains("outage"));
+		assert!(upstream_status_message(404, "x").is_none());
 	}
 
 	#[test]
