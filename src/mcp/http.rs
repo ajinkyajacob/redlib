@@ -129,6 +129,11 @@ fn error_response(error: RedditError) -> Response<BoxBody<Bytes, Infallible>> {
 	if status == StatusCode::UNAUTHORIZED {
 		response.headers_mut().insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
 	}
+	if status == StatusCode::TOO_MANY_REQUESTS {
+		if let Ok(value) = HeaderValue::from_str(&crate::api::RETRY_AFTER_SECS.to_string()) {
+			response.headers_mut().insert("retry-after", value);
+		}
+	}
 	response
 }
 
@@ -172,5 +177,12 @@ mod tests {
 	#[test]
 	fn allowed_hosts_parse_a_comma_separated_list() {
 		assert_eq!(parse_allowed_hosts(Some("example.com, example.com:8080 ,,")), vec!["example.com", "example.com:8080"]);
+	}
+
+	#[test]
+	fn mcp_rate_limit_response_carries_retry_after() {
+		let res = error_response(crate::api::rate_limited_error());
+		assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+		assert_eq!(res.headers().get("retry-after").unwrap(), "5");
 	}
 }

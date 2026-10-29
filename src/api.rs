@@ -195,6 +195,11 @@ fn err_response(e: RedditError) -> Result<Response<Body>, String> {
 			res.headers_mut().insert(WWW_AUTHENTICATE, challenge);
 		}
 	}
+	if status == 429 {
+		if let Ok(value) = HeaderValue::from_str(&RETRY_AFTER_SECS.to_string()) {
+			res.headers_mut().insert("retry-after", value);
+		}
+	}
 	Ok(res)
 }
 
@@ -379,6 +384,19 @@ mod tests {
 		let res = err_response(RedditError::new(ErrorKind::Unauthorized, "missing bearer token")).unwrap();
 		assert_eq!(res.status(), 401);
 		assert_eq!(res.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
+	}
+
+	#[test]
+	fn rate_limited_error_carries_retry_after() {
+		let res = err_response(rate_limited_error()).unwrap();
+		assert_eq!(res.status(), 429);
+		assert_eq!(res.headers().get("retry-after").unwrap(), "5");
+	}
+
+	#[test]
+	fn unauthorized_error_has_no_retry_after() {
+		let res = err_response(RedditError::new(ErrorKind::Unauthorized, "nope")).unwrap();
+		assert!(res.headers().get("retry-after").is_none());
 	}
 
 	#[test]
