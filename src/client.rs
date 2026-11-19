@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 use wreq::dns::{Addrs, Name, Resolve, Resolving};
 use wreq::redirect::Policy;
 use wreq::{header as wreq_header, Client as WreqClient, Method, Response as WreqResponse};
-use wreq_util::{Emulation, Platform, Profile};
+use wreq_util::{Emulation, Profile};
 
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
@@ -77,16 +77,13 @@ pub fn build_client() -> WreqClient {
 	// Keeping this list short to aid in privacy.
 	// The more emulations, the more unique a fingerprint each instance has.
 	// But some emulations should increase evasiveness.
-	let emulation = [Profile::Chrome145, Profile::Firefox147];
-	let emulation_platform = [Platform::Android, Platform::Windows];
+	let emulation = [Profile::OkHttp4_9, Profile::Chrome131, Profile::FirefoxAndroid135];
+	let profiles = ["okhttp_4.9", "chrome_131", "firefox_android_135"];
 
 	let rand = fastrand::usize(..);
-	let emulation = Emulation::builder()
-		.profile(emulation[rand % emulation.len()])
-		.platform(emulation_platform[rand % emulation_platform.len()])
-		.build();
+	let emulation = Emulation::builder().profile(emulation[rand % emulation.len()]).build();
 
-	info!("Building Wreq client with random emulation");
+	info!("Building Wreq client with random emulation: {}", profiles[rand % profiles.len()]);
 	WreqClient::builder()
 		.emulation(emulation)
 		.redirect(Policy::none())
