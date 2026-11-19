@@ -218,9 +218,24 @@ impl MobileSpoofAuth {
 
 impl OauthBackend for MobileSpoofAuth {
 	async fn authenticate(&mut self) -> Result<OauthResponse, AuthError> {
+		// A logged-in session can mint a user-scoped token, which Reddit requires
+		// for search (and for the site as a whole once logged-out access ends).
+		let session = std::env::var("REDLIB_REDDIT_COOKIE")
+			.ok()
+			.map(|value| value.trim().to_string())
+			.filter(|value| !value.is_empty())
+			.map(|value| if value.starts_with("reddit_session=") { value } else { format!("reddit_session={value}") });
+
 		// Construct URL for OAuth token
-		let url = format!("{AUTH_ENDPOINT}/auth/v2/oauth/access-token/loid");
+		let url = match session {
+			Some(_) => format!("{AUTH_ENDPOINT}/auth/v2/oauth/access-token/session"),
+			None => format!("{AUTH_ENDPOINT}/auth/v2/oauth/access-token/loid"),
+		};
 		let mut builder = CLIENT.post(&url);
+
+		if let Some(session) = &session {
+			builder = builder.header("Cookie", session.clone());
+		}
 
 		// Add headers from spoofed client
 		for (key, value) in &self.device.initial_headers {
@@ -234,9 +249,19 @@ impl OauthBackend for MobileSpoofAuth {
 		builder = builder.header("Authorization", format!("Basic {auth}"));
 
 		// Set JSON body. I couldn't tell you what this means. But that's what the client sends
-		let json = json!({
-				"scopes": ["*","email", "pii"]
-		});
+		let json = if session.is_some() {
+			json!({
+					"scopes": ["*", "email", "pii", "adsread", "adsedit"]
+			})
+		} else {
+			json!({
+					"scopes": ["*","email", "pii"]
+			})
+		};
+
+		if session.is_some() {
+			info!("Minting a session-scoped token from REDLIB_REDDIT_COOKIE");
+		}
 
 		trace!("Sending token request to {url}...");
 
