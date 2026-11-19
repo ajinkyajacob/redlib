@@ -84,8 +84,27 @@ pub fn build_client() -> WreqClient {
 	let emulation = Emulation::builder().profile(emulation[rand % emulation.len()]).build();
 
 	info!("Building Wreq client with random emulation: {}", profiles[rand % profiles.len()]);
+
+	// Reddit serves search results only to a logged-in session, so an optional
+	// session cookie can be attached to every upstream request.
+	let mut headers = wreq_header::HeaderMap::new();
+	if let Ok(cookie) = std::env::var("REDLIB_REDDIT_COOKIE") {
+		let cookie = cookie.trim();
+		if !cookie.is_empty() {
+			let value = if cookie.starts_with("reddit_session=") { cookie.to_owned() } else { format!("reddit_session={cookie}") };
+			match wreq_header::HeaderValue::from_str(&value) {
+				Ok(value) => {
+					headers.insert(wreq_header::COOKIE, value);
+					info!("Attaching REDLIB_REDDIT_COOKIE to upstream Reddit requests");
+				}
+				Err(e) => warn!("REDLIB_REDDIT_COOKIE is not a valid header value: {e}"),
+			}
+		}
+	}
+
 	WreqClient::builder()
 		.emulation(emulation)
+		.default_headers(headers)
 		.redirect(Policy::none())
 		.dns_resolver(RedditDnsResolver)
 		.build()
