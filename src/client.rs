@@ -77,8 +77,8 @@ pub fn build_client() -> WreqClient {
 	// Keeping this list short to aid in privacy.
 	// The more emulations, the more unique a fingerprint each instance has.
 	// But some emulations should increase evasiveness.
-	let emulation = [Profile::OkHttp4_9, Profile::Chrome131, Profile::FirefoxAndroid135];
-	let profiles = ["okhttp_4.9", "chrome_131", "firefox_android_135"];
+	let emulation = [Profile::OkHttp4_9, Profile::Chrome131];
+	let profiles = ["okhttp_4.9", "chrome_131"];
 
 	let rand = fastrand::usize(..);
 	let emulation = Emulation::builder().profile(emulation[rand % emulation.len()]).build();
